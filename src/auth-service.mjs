@@ -21,14 +21,21 @@ export const supabase = authConfigured ? createClient(supabaseUrl, supabaseKey, 
 }) : null;
 
 export async function getAuthCapabilities() {
-  if (!authConfigured) return { email: false, google: false };
+  if (!authConfigured) return { email: false, google: false, profiles: false };
   try {
-    const response = await fetch(`${supabaseUrl}/auth/v1/settings`, { headers: { apikey: supabaseKey } });
-    if (!response.ok) return { email: true, google: false };
-    const settings = await response.json();
-    return { email: Boolean(settings.external?.email), google: Boolean(settings.external?.google) };
+    const headers = { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` };
+    const [settingsResponse, profilesResponse] = await Promise.all([
+      fetch(`${supabaseUrl}/auth/v1/settings`, { headers: { apikey: supabaseKey } }),
+      fetch(`${supabaseUrl}/rest/v1/profiles?select=user_id&limit=1`, { headers })
+    ]);
+    const settings = settingsResponse.ok ? await settingsResponse.json() : null;
+    return {
+      email: settings ? Boolean(settings.external?.email) : true,
+      google: settings ? Boolean(settings.external?.google) : false,
+      profiles: profilesResponse.ok
+    };
   } catch {
-    return { email: true, google: false };
+    return { email: true, google: false, profiles: false };
   }
 }
 
