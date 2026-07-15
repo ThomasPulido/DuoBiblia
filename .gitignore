@@ -7,6 +7,8 @@ ios/App/Pods/
 ios/App/build/
 .DS_Store
 *.log
+.env.local
+.env.*.local
 tmp/
 .toolchains/
 .signing/

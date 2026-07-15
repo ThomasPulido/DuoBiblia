@@ -128,13 +128,15 @@ test("Mi Biblia integrada proviene exactamente del PDF entregado", async () => {
 
 test("al crear una cuenta se integra el progreso local sin perder el remoto", () => {
   const merged = mergeProgress(
-    { streak: 12, points: 800, favorites: ["john-14-27"], notes: { a: "remota" } },
-    { streak: 4, points: 120, favorites: ["psalm-23-4"], notes: { b: "local" } }
+    { streak: 12, points: 800, favorites: ["john-14-27"], notes: { a: "remota" }, highlights: { a: "gold" }, verseRecords: { a: { key: "a" } } },
+    { streak: 4, points: 120, favorites: ["psalm-23-4"], notes: { b: "local" }, highlights: { b: "sage" }, verseRecords: { b: { key: "b" } } }
   );
   assert.equal(merged.streak, 12);
   assert.equal(merged.points, 800);
   assert.deepEqual(merged.favorites, ["john-14-27", "psalm-23-4"]);
   assert.deepEqual(merged.notes, { a: "remota", b: "local" });
+  assert.deepEqual(merged.highlights, { a: "gold", b: "sage" });
+  assert.deepEqual(merged.verseRecords, { a: { key: "a" }, b: { key: "b" } });
 });
 
 test("la versión mínima permite bloquear instalaciones antiguas", () => {
@@ -143,8 +145,8 @@ test("la versión mínima permite bloquear instalaciones antiguas", () => {
   assert.equal(compareVersions("2.0.0", "1.9.9"), 1);
 });
 
-test("la versión 1.2.0 usa el nuevo enlace de Bold y los anuncios iOS entregados", () => {
-  assert.equal(APP_VERSION, "1.2.0");
+test("la versión 1.3.0 usa el nuevo enlace de Bold y los anuncios iOS entregados", () => {
+  assert.equal(APP_VERSION, "1.3.0");
   assert.equal(BOLD_CHECKOUT_URL, "https://checkout.bold.co/payment/LNK_84NNU7YDX9");
   assert.equal(ADMOB_IDS.iosAppId, "ca-app-pub-8007313797348394~9653183215");
   assert.equal(ADMOB_IDS.appOpen.iosProduction, "ca-app-pub-8007313797348394/7027019877");

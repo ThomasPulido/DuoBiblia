@@ -18,7 +18,7 @@ import { initializeMobileAds, showAchievementInterstitial } from "./src/ads.mjs"
 import { BIBLE_VERSIONS, getBibleChapter, searchBible } from "./src/bible-service.mjs";
 import { chooseNextTrack, prayerTracks } from "./src/music.mjs";
 import { translateWithContext } from "./src/translation-service.mjs";
-import { authConfigured, claimStreakReward, getEntitlement, initializeAuth, sendEmailCode, signInWithGoogle, signOut, syncProgress, verifyEmailCode } from "./src/auth-service.mjs";
+import { authConfigured, claimStreakReward, getAuthCapabilities, getEntitlement, initializeAuth, sendEmailCode, signInWithGoogle, signOut, syncProgress, verifyEmailCode } from "./src/auth-service.mjs";
 import { externalBillingEnabled, openBoldCheckout } from "./src/billing-service.mjs";
 import { APP_VERSION, checkRequiredUpdate, openRequiredUpdate } from "./src/update-service.mjs";
 import { syncNativePremiumState } from "./src/native-state.mjs";
@@ -48,6 +48,8 @@ const initialState = {
   moodDate: null,
   favorites: [],
   notes: {},
+  highlights: {},
+  verseRecords: {},
   quizCompleted: false,
   quizAnswer: null,
   lastQuizDate: null,
@@ -63,6 +65,8 @@ const initialState = {
   authLoading: false,
   authError: null,
   authEmail: "",
+  googleAuthEnabled: null,
+  emailAuthEnabled: true,
   pendingPremium: false,
   pendingStreakReward: false,
   notificationPromptSeen: false,
@@ -75,6 +79,7 @@ let state = loadState();
 let prayerAudio = null;
 let progressSyncTimer = null;
 let prayerOpenedFromNotification = false;
+let activeSelectionKey = null;
 const app = document.querySelector("#app");
 const toastRegion = document.querySelector("#toast-region");
 
@@ -155,13 +160,104 @@ function icon(name, label = "") {
     music: '<path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>',
     bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/>',
     skip: '<path d="m5 5 10 7L5 19V5ZM19 5v14"/>',
-    translate: '<path d="M4 5h10M9 3v2M7 5c0 4 2 7 7 9M12 5c-1 4-4 7-8 9M14 20l3-8 3 8M15 17h4"/>'
+    translate: '<path d="M4 5h10M9 3v2M7 5c0 4 2 7 7 9M12 5c-1 4-4 7-8 9M14 20l3-8 3 8M15 17h4"/>',
+    share: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.5-4.5M8.2 13.2l7.5 4.5"/>',
+    palette: '<path d="M12 3a9 9 0 0 0 0 18h1.4a2.1 2.1 0 0 0 1.2-3.8 1.8 1.8 0 0 1 1-3.3H18A3 3 0 0 0 21 11a8 8 0 0 0-9-8Z"/><circle cx="7.5" cy="10" r=".8" fill="currentColor"/><circle cx="10" cy="6.8" r=".8" fill="currentColor"/><circle cx="14.2" cy="6.8" r=".8" fill="currentColor"/><circle cx="16.8" cy="10" r=".8" fill="currentColor"/>',
+    more: '<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>'
   };
   return `<svg class="icon icon-${name}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.star}</svg>${label ? `<span class="sr-only">${label}</span>` : ""}`;
 }
 
 function spotIllustration(name, extraClass = "") {
   return `<span class="spot-illustration spot-${name} ${extraClass}" aria-hidden="true"></span>`;
+}
+
+function featuredVerseRecord(verse, sourceLang = state.uiLang) {
+  const language = sourceLang === "es" ? "es" : "en";
+  return {
+    key: verse.id,
+    featuredId: verse.id,
+    text: verse[language],
+    reference: verse.reference[language],
+    sourceLang: language,
+    version: language === "en" ? "kjv" : "mi-biblia",
+    bookId: verse.book.id,
+    chapter: verse.chapter,
+    verse: verse.verse
+  };
+}
+
+function chapterVerseRecord(value, verseNumber, version, book, chapter) {
+  return {
+    key: `bible:${version.id}:${book.id}:${chapter}:${verseNumber}`,
+    text: value,
+    reference: `${book[version.language]} ${chapter}:${verseNumber}`,
+    sourceLang: version.language,
+    version: version.id,
+    bookId: book.id,
+    chapter,
+    verse: verseNumber
+  };
+}
+
+function verseHostAttributes(record) {
+  return `data-verse-key="${escapeHtml(record.key)}" data-featured-id="${escapeHtml(record.featuredId || "")}" data-verse-text="${escapeHtml(record.text)}" data-verse-reference="${escapeHtml(record.reference)}" data-source-lang="${record.sourceLang}" data-version="${record.version}" data-book-id="${record.bookId || ""}" data-chapter="${record.chapter || ""}" data-verse-number="${record.verse || ""}" data-verse-context="${escapeHtml(record.text)}"`;
+}
+
+function recordFromElement(element) {
+  const host = element?.closest?.("[data-verse-key]");
+  const featuredId = host?.dataset.featuredId || element?.dataset?.verse || "";
+  if (featuredId) {
+    const sourceLang = host?.dataset.sourceLang || state.uiLang;
+    return featuredVerseRecord(getVerse(featuredId), sourceLang);
+  }
+  if (!host) return null;
+  return {
+    key: host.dataset.verseKey,
+    text: host.dataset.verseText,
+    reference: host.dataset.verseReference,
+    sourceLang: host.dataset.sourceLang,
+    version: host.dataset.version,
+    bookId: host.dataset.bookId,
+    chapter: Number(host.dataset.chapter),
+    verse: Number(host.dataset.verseNumber)
+  };
+}
+
+function resolveVerseRecord(key) {
+  const featured = featuredVerses.find((verse) => verse.id === key);
+  if (featured) return featuredVerseRecord(featured, state.verseRecords[key]?.sourceLang || state.uiLang);
+  return state.verseRecords[key] || null;
+}
+
+function withStoredRecord(record, patch = {}) {
+  if (!record) return patch;
+  return { ...patch, verseRecords: { ...state.verseRecords, [record.key]: record } };
+}
+
+function highlightClass(key) {
+  const color = state.highlights[key];
+  return color ? `verse-highlight highlight-${color}` : "";
+}
+
+function renderSelectionBar() {
+  return `<div class="selection-toolbar" aria-live="polite"><span class="selection-preview"></span><button data-action="translate-selection">${icon("translate")}<b>${dualText("Traducir selección", "Translate selection")}</b></button><button class="selection-clear" data-action="clear-selection" aria-label="${text("Limpiar selección", "Clear selection")}">${icon("close")}</button></div>`;
+}
+
+function renderVerseTools(record, compact = false) {
+  if (compact) {
+    return `<button class="verse-more-button" data-action="open-verse-tools" aria-label="${text("Opciones del versículo", "Verse options")}">${icon("more")}</button>`;
+  }
+  const favorite = state.favorites.includes(record.key);
+  const noted = Boolean(state.notes[record.key]);
+  const highlighted = Boolean(state.highlights[record.key]);
+  return `<div class="verse-action-row">
+    <button class="${favorite ? "active" : ""}" data-action="toggle-favorite" aria-label="${text("Favorito", "Favorite")}">${icon("heart")}</button>
+    <button class="${noted ? "active" : ""}" data-action="open-note" aria-label="${text("Añadir nota", "Add note")}">${icon("note")}</button>
+    <button class="${highlighted ? "active" : ""}" data-action="open-highlight" aria-label="${text("Cambiar color", "Change color")}">${icon("palette")}</button>
+    <button data-action="share-verse" aria-label="${text("Compartir versículo", "Share verse")}">${icon("share")}</button>
+    <button data-action="translate-verse" aria-label="${text("Traducir versículo", "Translate verse")}">${icon("translate")}</button>
+  </div>`;
 }
 
 function render() {
@@ -375,21 +471,20 @@ function renderRoute() {
 
 function renderHome() {
   const verse = getDailyVerse();
+  const verseRecord = featuredVerseRecord(verse, state.uiLang);
   const prayer = getPrayerExperience();
   const prayerDone = state.lastPrayerDate === dateKey();
   return `
-    <section class="reference-home-hero">
+    <section class="reference-home-hero ${highlightClass(verseRecord.key)}" ${verseHostAttributes(verseRecord)}>
       <div class="hero-backdrop" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="hero-streak">${icon("flame")}<strong>${state.streak}</strong>${dualText("días de racha", "day streak", "hero-streak-copy")}</div>
       <span class="hero-kicker">${dualText("VERSÍCULO DEL DÍA", "VERSE OF THE DAY")}</span>
-      <button class="hero-verse-button" data-action="open-reader" data-verse="${verse.id}">
-        <blockquote>“${verse[state.uiLang]}”</blockquote>
-        <span>${verse.reference[state.uiLang]} ›</span>
-      </button>
-      <div class="hero-actions">
-        <button data-action="open-reader" data-verse="${verse.id}" aria-label="${text("Abrir en la Biblia", "Open in Bible")}">${icon("bible")}</button>
-        <button data-action="translate-verse" data-verse="${verse.id}" aria-label="${text("Ver traducción", "See translation")}">${icon("translate")}</button>
-      </div>
+      <article class="hero-verse-button">
+        <blockquote>“${renderInteractiveText(verse[state.uiLang])}”</blockquote>
+        <button class="hero-reference-button" data-action="open-reader" data-verse="${verse.id}">${verse.reference[state.uiLang]} ›</button>
+      </article>
+      ${renderSelectionBar()}
+      ${renderVerseTools(verseRecord)}
     </section>
 
     <div class="reference-home-body">
@@ -480,7 +575,11 @@ function renderKjvChapter() {
     ${state.kjvLoading ? `<div class="chapter-loading">${text("Abriendo el texto bíblico verificado…", "Opening the verified Bible text…")}</div>` : ""}
     ${state.kjvError ? `<div class="empty-state">${escapeHtml(state.kjvError)}</div>` : ""}
     <article class="kjv-chapter">
-      ${verses.map((value, verse) => value ? `<p id="bible-verse-${verse}" class="kjv-verse ${state.selectedKjvVerse === verse ? "focused" : ""}" data-source-lang="${version.language}" data-verse-context="${escapeHtml(value)}"><sup>${verse}</sup>${renderInteractiveText(value)}</p>` : "").join("")}
+      ${verses.map((value, verse) => {
+        if (!value) return "";
+        const record = chapterVerseRecord(value, verse, version, book, chapter);
+        return `<section id="bible-verse-${verse}" class="chapter-verse ${state.selectedKjvVerse === verse ? "focused" : ""} ${highlightClass(record.key)}" ${verseHostAttributes(record)}><p class="kjv-verse"><sup>${verse}</sup>${renderInteractiveText(value)}</p>${renderSelectionBar()}${renderVerseTools(record, true)}</section>`;
+      }).join("")}
     </article>
     <aside class="kjv-source-note">${version.id === "kjv" ? `KJV 1769 · eBible.org / Crosswire Bible Society · ${text("Dominio público fuera del Reino Unido", "Public domain outside the United Kingdom")}` : `Mi Biblia traducida.pdf · ${text("Texto aportado por el propietario del proyecto", "Text supplied by the project owner")}`}</aside>`;
 }
@@ -549,6 +648,7 @@ function renderPrayer() {
   const track = prayerTracks.find((item) => item.id === state.currentTrackId) || prayerTracks[0];
   const secondaryLang = sourceLang === "es" ? "en" : "es";
   const done = state.lastPrayerDate === dateKey();
+  const verseRecord = featuredVerseRecord(verse, sourceLang);
   return `
     <section class="prayer-hero prayer-${prayer.period}">
       <span class="eyebrow">${dualText("MOMENTO DE ORACIÓN", "PRAYER MOMENT")}<b class="local-time">${new Intl.DateTimeFormat(state.uiLang === "es" ? "es-CO" : "en-US", { hour: "numeric", minute: "2-digit" }).format(new Date())}</b></span>
@@ -558,12 +658,13 @@ function renderPrayer() {
       <div class="prayer-music-card ${state.audioPlaying ? "playing" : "muted"}"><button class="music-orbit-button" data-action="toggle-audio" aria-label="${state.audioPlaying ? text("Pausar música", "Pause music") : text("Reproducir música", "Play music")}">${icon(state.audioPlaying ? "pause" : "music")}</button><div>${dualText(state.audioPlaying ? "SONANDO AHORA" : "MÚSICA EN PAUSA", state.audioPlaying ? "NOW PLAYING" : "MUSIC PAUSED", "music-status")}<strong>${dualObject(track.label, "track-copy")}</strong></div><button class="music-next-button" data-action="next-track" aria-label="${text("Siguiente canción", "Next track")}">${icon("skip")}</button><i class="music-equalizer"><b></b><b></b><b></b><b></b></i></div>
     </section>
     <article class="devotional-content">
-      <section class="devotional-section verse-section">
+      <section class="devotional-section verse-section ${highlightClass(verseRecord.key)}" ${verseHostAttributes(verseRecord)}>
         <span class="section-number">01</span><p class="eyebrow">${dualText("VERSÍCULO DEL DÍA", "VERSE OF THE DAY")}</p>
         <div class="interactive-verse" data-source-lang="${sourceLang}" data-verse-context="${escapeHtml(verse[sourceLang])}">${renderInteractiveText(verse[sourceLang])}</div>
+        ${renderSelectionBar()}
         <strong class="scripture-ref">${verse.reference[sourceLang]} · ${versionLabel}</strong>
         <p class="devotional-secondary scripture-secondary" lang="${secondaryLang}">${escapeHtml(verse[secondaryLang])}</p>
-        <button class="translation-link" data-action="translate-verse" data-verse="${verse.id}">${icon("translate")} ${dualText("Ver traducción completa", "See full translation")}</button>
+        ${renderVerseTools(verseRecord)}
       </section>
       <section class="devotional-section meditation-section">
         <span class="section-number">02</span><p class="eyebrow">${dualText("MEDITACIÓN", "MEDITATION")}</p>
@@ -583,9 +684,11 @@ function renderPrayer() {
 }
 
 function renderInteractiveText(value) {
+  let tokenIndex = 0;
   return value.split(/(\s+)/).map((token) => {
     if (/^\s+$/.test(token)) return token;
-    return `<button class="word-token" data-action="translate-word" data-word="${escapeHtml(token)}">${escapeHtml(token)}</button>`;
+    const index = tokenIndex++;
+    return `<button class="word-token" data-action="select-word" data-token-index="${index}" data-word="${escapeHtml(token)}">${escapeHtml(token)}</button>`;
   }).join("");
 }
 
@@ -598,21 +701,24 @@ function renderReader() {
   const isFavorite = state.favorites.includes(verse.id);
   const note = state.notes[verse.id];
   const presentation = getReaderPresentation(verse.id);
+  const verseRecord = featuredVerseRecord(verse, sourceLang);
   return `
+    <div class="reader-shell ${highlightClass(verseRecord.key)}" ${verseHostAttributes(verseRecord)}>
     <section class="reader-toolbar">
       <div class="version-toggle"><button data-action="switch-bible-version" data-version="kjv" class="${sourceLang === "en" ? "active" : ""}">KJV</button><button data-action="switch-bible-version" data-version="mi-biblia" class="${sourceLang === "es" ? "active" : ""}">${dualText("MI BIBLIA", "MY BIBLE")}</button></div>
-      <div><button class="icon-button ${isFavorite ? "favorite" : ""}" data-action="toggle-favorite" data-verse="${verse.id}">${icon("heart", text("Favorito", "Favorite"))}</button><button class="icon-button ${note ? "has-note" : ""}" data-action="open-note" data-verse="${verse.id}">${icon("note", text("Nota", "Note"))}</button></div>
+      ${renderVerseTools(verseRecord)}
     </section>
     <article class="reader-page">
       <header><span>${dualText(`${verse.book.es.toUpperCase()} · ${sourceLang === "es" ? sourceVersion : targetVersion}`, `${verse.book.en.toUpperCase()} · ${sourceLang === "en" ? sourceVersion : targetVersion}`)}</span><h1>${dualText(verse.reference.es, verse.reference.en)}</h1><p>${dualText("Toca una palabra para traducirla", "Tap a word to translate it")}</p></header>
       <div class="chapter-rule"><span>${verse.chapter}</span></div>
       <p class="reader-verse" data-source-lang="${sourceLang}" data-verse-context="${escapeHtml(verse[sourceLang])}"><sup>${verse.verse}</sup>${renderInteractiveText(verse[sourceLang])}</p>
+      ${renderSelectionBar()}
       <div class="phrase-actions"><button data-action="translate-phrase" data-phrase="${escapeHtml(sourceLang === "en" ? presentation.phrase : presentation.phraseEs)}" data-translation="${escapeHtml(sourceLang === "en" ? presentation.phraseEs : presentation.phrase)}">${icon("translate")} ${dualText(presentation.phraseEs, presentation.phrase)}</button><button data-action="translate-verse" data-verse="${verse.id}">${dualText("Traducir versículo", "Translate verse")}</button></div>
       <aside class="parallel-translation"><span>${targetVersion} · ${targetLang === "en" ? "ENGLISH" : "ESPAÑOL"}</span><p>${verse[targetLang]}</p></aside>
       ${note ? `<aside class="saved-note"><span>${icon("note")} ${dualText("TU NOTA", "YOUR NOTE")}</span><p>${escapeHtml(note)}</p><button data-action="open-note" data-verse="${verse.id}">${dualText("Editar", "Edit")}</button></aside>` : ""}
       <section class="reader-context"><span class="eyebrow">${dualText("PARA COMPRENDER", "FOR UNDERSTANDING")}</span><h2>${dualObject(presentation.title)}</h2><p>${presentation.description[state.uiLang]}</p><p class="reader-context-secondary">${escapeHtml(presentation.description[opposite()])}</p></section>
       <nav class="verse-pager"><button data-action="previous-verse">← ${dualText("Anterior", "Previous")}</button><span>${featuredVerses.findIndex((item) => item.id === verse.id) + 1} / ${featuredVerses.length}</span><button data-action="next-verse">${dualText("Siguiente", "Next")} →</button></nav>
-    </article>`;
+    </article></div>`;
 }
 
 function getReaderPresentation(verseId) {
@@ -659,10 +765,11 @@ function getReaderPresentation(verseId) {
 function renderTopics() {
   const topic = topics.find((item) => item.id === state.selectedTopic) || topics[0];
   const verse = getVerse(topic.verseId);
+  const verseRecord = featuredVerseRecord(verse, state.uiLang);
   return `
     <section class="topics-hero">${spotIllustration(({ amor: "favorite", paz: "prayer", fe: "bible", perdon: "note", bendiciones: "streak", salvacion: "premium" })[topic.id] || "bible")}<p class="eyebrow">${dualText("PALABRAS DE DIOS PARA HOY", "GOD'S WORDS FOR TODAY")}</p><h1>${dualObject(topic.label)}</h1><p>${dualText("Versículos seleccionados para este momento de tu camino.", "Verses selected for this moment in your journey.")}</p></section>
     <div class="topic-selector">${topics.map(renderTopicChip).join("")}</div>
-    <button class="topic-verse-card" data-action="open-reader" data-verse="${verse.id}"><span>${dualText(verse.reference.es, verse.reference.en)}</span><blockquote>“${verse[state.uiLang]}”</blockquote><small>${dualText("Leer y aprender palabra por palabra", "Read and learn word by word")} ${icon("chevron")}</small></button>
+    <article class="topic-verse-card ${highlightClass(verseRecord.key)}" ${verseHostAttributes(verseRecord)}><button class="topic-reference-button" data-action="open-reader" data-verse="${verse.id}">${dualText(verse.reference.es, verse.reference.en)} ${icon("chevron")}</button><blockquote>“${renderInteractiveText(verse[state.uiLang])}”</blockquote>${renderSelectionBar()}${renderVerseTools(verseRecord)}<small>${dualText("Toca varias palabras y traduce la selección completa", "Tap several words and translate the full selection")}</small></article>
     <article class="curiosity-card"><span class="curiosity-icon">?</span><div><p class="eyebrow">${dualText("¿SABÍAS QUE...?", "DID YOU KNOW?")}</p><h3>${dualText("La palabra “paz” tiene una historia profunda", "The word “peace” has a deep history")}</h3><p>${dualText("El concepto bíblico de shalom abarca bienestar, integridad, armonía y plenitud, no solamente ausencia de conflicto.", "The biblical idea of shalom includes well-being, wholeness, harmony, and flourishing—not only the absence of conflict.")}</p></div></article>`;
 }
 
@@ -683,7 +790,8 @@ function renderModal() {
   if (state.modal.type === "mood-verse") {
     const verse = getMoodVerse(state.modal.moodId);
     const mood = moodOptions.find((item) => item.id === state.modal.moodId);
-    return `<div class="modal-layer mood-result-layer"><div class="modal-card mood-result">${close}<span class="result-emoji">${mood.emoji}</span><p class="eyebrow">${text("UNA PALABRA PARA TI", "A WORD FOR YOU")}</p><h2>${text("No tienes que cargar esto solo.", "You don't have to carry this alone.")}</h2><blockquote>“${verse[state.uiLang]}”</blockquote><strong>${verse.reference[state.uiLang]}</strong><button class="primary-button" data-action="read-mood-verse" data-verse="${verse.id}">${text("Leer en la Biblia", "Read in the Bible")}</button><button class="secondary-button" data-action="continue-home">${text("Ir al inicio", "Go home")}</button></div></div>`;
+    const record = featuredVerseRecord(verse, state.uiLang);
+    return `<div class="modal-layer mood-result-layer"><div class="modal-card mood-result ${highlightClass(record.key)}" ${verseHostAttributes(record)}>${close}<span class="result-emoji">${mood.emoji}</span><p class="eyebrow">${dualText("UNA PALABRA PARA TI", "A WORD FOR YOU")}</p><h2>${dualText("No tienes que cargar esto solo.", "You don't have to carry this alone.")}</h2><blockquote>“${renderInteractiveText(verse[state.uiLang])}”</blockquote>${renderSelectionBar()}<strong>${dualText(verse.reference.es, verse.reference.en)}</strong>${renderVerseTools(record)}<button class="primary-button" data-action="read-mood-verse" data-verse="${verse.id}">${dualText("Leer en la Biblia", "Read in the Bible")}</button><button class="secondary-button" data-action="continue-home">${dualText("Ir al inicio", "Go home")}</button></div></div>`;
   }
   if (state.modal.type === "notifications") {
     return `<div class="modal-layer"><div class="modal-card notification-modal">${close}<span class="notification-orbit">${icon("bell")}</span><p class="eyebrow">${text("UN RITMO PARA TU DÍA", "A RHYTHM FOR YOUR DAY")}</p><h2>${text("¿Te acompañamos a orar?", "May we remind you to pray?")}</h2><p>${text("Recibe recordatorios suaves a las 7:00, 15:00 y 21:30 según la hora local de tu celular.", "Receive gentle reminders at 7:00 AM, 3:00 PM, and 9:30 PM in your phone's local time.")}</p><div class="notification-times"><span>☀ <b>7:00</b></span><span>✦ <b>15:00</b></span><span>☾ <b>21:30</b></span></div><button class="primary-button" data-action="enable-notifications">${text("Activar recordatorios", "Enable reminders")}</button><button class="secondary-button" data-action="close-modal">${text("Ahora no", "Not now")}</button><small>${text("Puedes cambiarlos después en Perfil · Preferencias.", "You can change them later in Profile · Preferences.")}</small></div></div>`;
@@ -692,19 +800,37 @@ function renderModal() {
     const help = state.modal.help;
     return `<div class="modal-layer bottom-layer" data-action="close-on-backdrop"><div class="bottom-sheet">${close}<div class="sheet-handle"></div><div class="translation-heading"><div><span class="eyebrow">${text("TRADUCCIÓN EN CONTEXTO", "CONTEXTUAL TRANSLATION")}</span><h2>${escapeHtml(state.modal.word)}</h2></div><button class="sound-button" data-action="speak-word" data-word="${escapeHtml(state.modal.word)}" data-language="${state.modal.sourceLang || "en"}">${icon("volume")}</button></div><div class="translation-main"><strong>${escapeHtml(help.translated ?? help.es)}</strong><span>${escapeHtml(help.pronunciation)} · ${escapeHtml(help.type)}</span></div><p>${escapeHtml(help.meaning)}</p><div class="context-box"><span>${text("EN ESTA FRASE", "IN THIS PHRASE")}</span><strong>${escapeHtml(help.phrase)}</strong><p>${escapeHtml(help.phraseEs)}</p></div><button class="primary-button" data-action="close-modal">${text("Entendido", "Got it")}</button></div></div>`;
   }
+  if (state.modal.type === "translation-loading") {
+    return `<div class="modal-layer bottom-layer"><div class="bottom-sheet translation-loading-sheet">${close}<div class="sheet-handle"></div><span class="translation-loader">${icon("translate")}</span><h2>${dualText("Preparando traducción", "Preparing translation")}</h2><p>${dualText("Buscando el pasaje paralelo y conservando su contexto…", "Finding the parallel passage and preserving its context…")}</p></div></div>`;
+  }
   if (state.modal.type === "verse-translation") {
-    const verse = getVerse(state.modal.verseId);
-    return `<div class="modal-layer bottom-layer"><div class="bottom-sheet verse-translation-sheet">${close}<div class="sheet-handle"></div><p class="eyebrow">${text("VERSÍCULO COMPLETO", "FULL VERSE")}</p><h2>${verse.reference.en}</h2><blockquote>${verse.en}</blockquote><div class="translation-divider">${icon("translate")}</div><h3>${verse.reference.es}</h3><p class="full-translation">${verse.es}</p><small>${text("La traducción palabra por palabra puede variar; aquí se muestra el sentido completo en contexto.", "Word-for-word translation may vary; this shows the full meaning in context.")}</small><button class="primary-button" data-action="close-modal">${text("Continuar leyendo", "Keep reading")}</button></div></div>`;
+    const source = state.modal.source || featuredVerseRecord(getVerse(state.modal.verseId), state.uiLang);
+    const target = state.modal.target || featuredVerseRecord(getVerse(state.modal.verseId), source.sourceLang === "en" ? "es" : "en");
+    return `<div class="modal-layer bottom-layer"><div class="bottom-sheet verse-translation-sheet">${close}<div class="sheet-handle"></div><p class="eyebrow">${dualText("VERSÍCULO COMPLETO", "FULL VERSE")}</p><h2>${escapeHtml(source.reference)}</h2><blockquote>${escapeHtml(source.text)}</blockquote><div class="translation-divider">${icon("translate")}</div><h3>${escapeHtml(target.reference)}</h3><p class="full-translation">${escapeHtml(target.text)}</p><small>${dualText("La traducción palabra por palabra puede variar; aquí se muestra el sentido completo en contexto.", "Word-for-word translation may vary; this shows the full meaning in context.")}</small><button class="primary-button" data-action="close-modal">${dualText("Continuar leyendo", "Keep reading")}</button></div></div>`;
+  }
+  if (state.modal.type === "verse-tools") {
+    const record = state.modal.record || resolveVerseRecord(state.modal.verseKey);
+    if (!record) return "";
+    return `<div class="modal-layer bottom-layer" data-action="close-on-backdrop"><div class="bottom-sheet verse-tools-sheet ${highlightClass(record.key)}" ${verseHostAttributes(record)}>${close}<div class="sheet-handle"></div><p class="eyebrow">${dualText("ACCIONES DEL VERSÍCULO", "VERSE ACTIONS")}</p><h2>${escapeHtml(record.reference)}</h2><blockquote>“${escapeHtml(record.text)}”</blockquote>${renderVerseTools(record)}<p class="verse-tools-hint">${dualText("Guarda, escribe una nota, cambia el color, comparte una imagen o abre la traducción paralela.", "Save, write a note, change its color, share an image, or open the parallel translation.")}</p></div></div>`;
+  }
+  if (state.modal.type === "highlight") {
+    const record = state.modal.record || resolveVerseRecord(state.modal.verseKey);
+    if (!record) return "";
+    const colors = [
+      ["gold", "Dorado", "Gold"], ["coral", "Coral", "Coral"], ["sage", "Verde", "Green"], ["blue", "Azul", "Blue"], ["none", "Sin color", "No color"]
+    ];
+    return `<div class="modal-layer bottom-layer"><div class="bottom-sheet highlight-sheet" ${verseHostAttributes(record)}>${close}<div class="sheet-handle"></div><p class="eyebrow">${dualText("COLOR DEL VERSÍCULO", "VERSE COLOR")}</p><h2>${escapeHtml(record.reference)}</h2><div class="highlight-options">${colors.map(([color, es, en]) => `<button class="color-${color} ${((state.highlights[record.key] || "none") === color) ? "selected" : ""}" data-action="set-highlight" data-color="${color}"><i></i>${dualText(es, en)}${((state.highlights[record.key] || "none") === color) ? icon("check") : ""}</button>`).join("")}</div></div></div>`;
   }
   if (state.modal.type === "note") {
-    const verse = getVerse(state.modal.verseId);
-    return `<div class="modal-layer"><form class="modal-card note-modal" id="note-form">${close}<span class="modal-icon">${icon("note")}</span><p class="eyebrow">${text("NOTA PERSONAL", "PERSONAL NOTE")}</p><h2>${verse.reference[state.uiLang]}</h2><p class="note-verse">“${verse[state.uiLang]}”</p><label>${text("¿Qué quieres recordar?", "What do you want to remember?")}<textarea id="note-text" maxlength="500" placeholder="${text("Escribe tu reflexión...", "Write your reflection...")}">${escapeHtml(state.notes[verse.id] || "")}</textarea></label><button class="primary-button" data-action="save-note" data-verse="${verse.id}">${text("Guardar nota", "Save note")}</button></form></div>`;
+    const record = state.modal.record || resolveVerseRecord(state.modal.verseKey || state.modal.verseId);
+    if (!record) return "";
+    return `<div class="modal-layer"><form class="modal-card note-modal" id="note-form" ${verseHostAttributes(record)}>${close}<span class="modal-icon">${icon("note")}</span><p class="eyebrow">${dualText("NOTA PERSONAL", "PERSONAL NOTE")}</p><h2>${escapeHtml(record.reference)}</h2><p class="note-verse">“${escapeHtml(record.text)}”</p><label>${dualText("¿Qué quieres recordar?", "What do you want to remember?")}<textarea id="note-text" maxlength="500" placeholder="${text("Escribe tu reflexión...", "Write your reflection...")}">${escapeHtml(state.notes[record.key] || "")}</textarea></label><button class="primary-button" data-action="save-note">${dualText("Guardar nota", "Save note")}</button></form></div>`;
   }
   if (state.modal.type === "streak") {
     return `<div class="modal-layer streak-layer"><div class="modal-card streak-celebration">${close}<div class="confetti"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="big-flame">${icon("flame")}</div><p class="eyebrow">${text("ORACIÓN COMPLETADA", "PRAYER COMPLETE")}</p><h2>${state.streak} ${text("días de racha", "day streak")}</h2><p>${text("Hoy elegiste comenzar con paz. Tu constancia está formando algo hermoso.", "Today you chose to begin in peace. Your consistency is shaping something beautiful.")}</p><div class="premium-progress"><div><span>${state.streak}</span><b>/ ${STREAK_GOAL}</b></div><div class="progress-track"><span style="width:${progressPercent(state.streak)}%"></span></div><small>${state.streak >= STREAK_GOAL ? text("¡Ganaste 1 mes Premium gratis!", "You earned 1 free Premium month!") : text(`${STREAK_GOAL - state.streak} días para 1 mes Premium gratis`, `${STREAK_GOAL - state.streak} days to 1 free Premium month`)}</small></div><span class="points-earned">${icon("star")} +50 XP</span>${state.streak >= STREAK_GOAL && !state.premium ? `<button class="primary-button" data-action="claim-streak-reward">${text("Reclamar mi mes gratis", "Claim my free month")}</button>` : ""}<button class="secondary-button" data-action="close-streak">${text("Continuar mi día", "Continue my day")}</button></div></div>`;
   }
   if (state.modal.type === "account") {
-    return `<div class="modal-layer"><form class="modal-card account-modal" id="account-form">${close}<img src="./assets/app-logo.png" alt=""/><p class="eyebrow">${state.pendingPremium || state.pendingStreakReward ? text("CUENTA REQUERIDA PARA PREMIUM", "ACCOUNT REQUIRED FOR PREMIUM") : text("GUARDA TU CAMINO", "SAVE YOUR JOURNEY")}</p><h2>${text("Inicia sesión o crea tu cuenta", "Sign in or create your account")}</h2><p>${text("Tu racha, puntos, favoritos y notas se integrarán automáticamente.", "Your streak, points, favorites, and notes will sync automatically.")}</p>${!authConfigured ? `<div class="auth-config-warning">${text("Falta conectar las credenciales de Supabase para enviar códigos reales y activar Google.", "Supabase credentials are required to send real codes and enable Google.")}</div>` : ""}<button type="button" class="google-auth-button" data-action="google-auth" ${state.authLoading || !authConfigured ? "disabled" : ""}><span>G</span>${text("Continuar con Google", "Continue with Google")}</button><div class="auth-divider"><span>${text("o con tu correo", "or use your email")}</span></div><label>Email<input id="account-email" required type="email" autocomplete="email" value="${escapeHtml(state.authEmail || "")}" placeholder="tu@email.com" /></label>${state.authError ? `<p class="auth-error">${escapeHtml(state.authError)}</p>` : ""}<button class="primary-button" data-action="send-email-code" ${state.authLoading || !authConfigured ? "disabled" : ""}>${state.authLoading ? text("Enviando…", "Sending…") : text("Enviar código de verificación", "Send verification code")}</button><small>${text("Recibirás un código de seis dígitos. No compartiremos tu correo.", "You'll receive a six-digit code. We won't share your email.")}</small></form></div>`;
+    return `<div class="modal-layer"><form class="modal-card account-modal" id="account-form">${close}<img src="./assets/app-logo.png" alt=""/><p class="eyebrow">${state.pendingPremium || state.pendingStreakReward ? text("CUENTA REQUERIDA PARA PREMIUM", "ACCOUNT REQUIRED FOR PREMIUM") : text("GUARDA TU CAMINO", "SAVE YOUR JOURNEY")}</p><h2>${text("Inicia sesión o crea tu cuenta", "Sign in or create your account")}</h2><p>${text("Tu racha, puntos, favoritos y notas se integrarán automáticamente.", "Your streak, points, favorites, and notes will sync automatically.")}</p>${!authConfigured ? `<div class="auth-config-warning">${dualText("Falta conectar Supabase.", "Supabase must be connected.")}</div>` : state.googleAuthEnabled === false ? `<div class="auth-config-warning">${dualText("El acceso por correo está disponible. Google se activará al configurar el proveedor en Supabase.", "Email access is available. Google will activate after its provider is configured in Supabase.")}</div>` : ""}<button type="button" class="google-auth-button" data-action="google-auth" ${state.authLoading || !authConfigured || state.googleAuthEnabled !== true ? "disabled" : ""}><span>G</span>${dualText(state.googleAuthEnabled === false ? "Google pendiente de activación" : "Continuar con Google", state.googleAuthEnabled === false ? "Google activation pending" : "Continue with Google")}</button><div class="auth-divider"><span>${text("o con tu correo", "or use your email")}</span></div><label>Email<input id="account-email" required type="email" autocomplete="email" value="${escapeHtml(state.authEmail || "")}" placeholder="tu@email.com" /></label>${state.authError ? `<p class="auth-error">${escapeHtml(state.authError)}</p>` : ""}<button class="primary-button" data-action="send-email-code" ${state.authLoading || !authConfigured || !state.emailAuthEnabled ? "disabled" : ""}>${state.authLoading ? text("Enviando…", "Sending…") : dualText("Enviar código de verificación", "Send verification code")}</button><small>${dualText("Recibirás un código de seis dígitos. No compartiremos tu correo.", "You'll receive a six-digit code. We won't share your email.")}</small></form></div>`;
   }
   if (state.modal.type === "email-code") {
     return `<div class="modal-layer"><form class="modal-card account-modal otp-modal" id="otp-form">${close}<img src="./assets/app-logo.png" alt=""/><p class="eyebrow">${text("VERIFICA TU CORREO", "VERIFY YOUR EMAIL")}</p><h2>${text("Escribe el código", "Enter the code")}</h2><p>${text(`Enviamos un código a ${state.authEmail}.`, `We sent a code to ${state.authEmail}.`)}</p><label>${text("Código de 6 dígitos", "6-digit code")}<input id="account-code" class="otp-input" required inputmode="numeric" autocomplete="one-time-code" minlength="6" maxlength="6" pattern="[0-9]{6}" placeholder="000000" /></label>${state.authError ? `<p class="auth-error">${escapeHtml(state.authError)}</p>` : ""}<button class="primary-button" data-action="verify-email-code" ${state.authLoading ? "disabled" : ""}>${state.authLoading ? text("Verificando…", "Verifying…") : text("Verificar y continuar", "Verify & continue")}</button><button type="button" class="secondary-button" data-action="resend-email-code">${text("Reenviar código", "Resend code")}</button></form></div>`;
@@ -720,7 +846,7 @@ function renderModal() {
   }
   if (state.modal.type === "collection") {
     const ids = state.modal.collection === "favorites" ? state.favorites : Object.keys(state.notes);
-    return `<div class="modal-layer"><div class="modal-card collection-modal">${close}<p class="eyebrow">${state.modal.collection === "favorites" ? text("VERSÍCULOS FAVORITOS", "FAVORITE VERSES") : text("MIS NOTAS", "MY NOTES")}</p><h2>${ids.length ? text("Tu biblioteca personal", "Your personal library") : text("Aún no hay elementos", "Nothing here yet")}</h2><div class="collection-list">${ids.length ? ids.map((id) => { const verse = getVerse(id); return `<button data-action="read-collection-item" data-verse="${id}"><strong>${verse.reference[state.uiLang]}</strong><p>${state.modal.collection === "notes" ? escapeHtml(state.notes[id]) : verse[state.uiLang]}</p>${icon("chevron")}</button>`; }).join("") : `<p class="empty-state">${text("Toca el corazón o añade una nota mientras lees la Biblia.", "Tap the heart or add a note while reading the Bible.")}</p>`}</div></div></div>`;
+    return `<div class="modal-layer"><div class="modal-card collection-modal">${close}<p class="eyebrow">${state.modal.collection === "favorites" ? dualText("VERSÍCULOS FAVORITOS", "FAVORITE VERSES") : dualText("MIS NOTAS", "MY NOTES")}</p><h2>${ids.length ? dualText("Tu biblioteca personal", "Your personal library") : dualText("Aún no hay elementos", "Nothing here yet")}</h2><div class="collection-list">${ids.length ? ids.map((id) => { const record = resolveVerseRecord(id); if (!record) return ""; return `<button data-action="read-collection-item" data-verse-key="${escapeHtml(id)}"><strong>${escapeHtml(record.reference)}</strong><p>${state.modal.collection === "notes" ? escapeHtml(state.notes[id]) : escapeHtml(record.text)}</p>${icon("chevron")}</button>`; }).join("") : `<p class="empty-state">${dualText("Toca el corazón o añade una nota mientras lees la Biblia.", "Tap the heart or add a note while reading the Bible.")}</p>`}</div></div></div>`;
   }
   return "";
 }
@@ -741,6 +867,8 @@ function progressForSync() {
     lastPrayerDate: state.lastPrayerDate,
     favorites: state.favorites,
     notes: state.notes,
+    highlights: state.highlights,
+    verseRecords: state.verseRecords,
     readChapters: state.readChapters,
     uiLang: state.uiLang,
     bibleVersion: state.bibleVersion
@@ -772,6 +900,8 @@ async function handleAuthSession(session) {
       lastPrayerDate: syncedProgress.lastPrayerDate ?? state.lastPrayerDate,
       favorites: syncedProgress.favorites || state.favorites,
       notes: syncedProgress.notes || state.notes,
+      highlights: syncedProgress.highlights || state.highlights,
+      verseRecords: syncedProgress.verseRecords || state.verseRecords,
       readChapters: syncedProgress.readChapters ?? state.readChapters,
       authLoading: false,
       authError: null,
@@ -846,6 +976,172 @@ function previousOrNextVerse(direction) {
   openReader(featuredVerses[next].id);
 }
 
+function clearSelectionUI() {
+  document.querySelectorAll(".word-token.selected").forEach((token) => token.classList.remove("selected"));
+  document.querySelectorAll("[data-verse-key].has-selection").forEach((host) => host.classList.remove("has-selection"));
+  document.querySelectorAll(".selection-preview").forEach((preview) => { preview.textContent = ""; });
+  activeSelectionKey = null;
+}
+
+function updateSelectionUI(host) {
+  const selected = [...host.querySelectorAll(".word-token.selected")];
+  const preview = host.querySelector(".selection-preview");
+  if (!selected.length) {
+    host.classList.remove("has-selection");
+    if (preview) preview.textContent = "";
+    activeSelectionKey = null;
+    return;
+  }
+  activeSelectionKey = host.dataset.verseKey;
+  host.classList.add("has-selection");
+  if (preview) preview.textContent = selected.map((token) => token.dataset.word).join(" ");
+}
+
+async function openContextTranslation(selection, context, sourceLang = "en") {
+  const cleanSelection = selection.trim();
+  if (!cleanSelection) return;
+  const singleWord = !/\s/.test(cleanSelection);
+  const localHelp = sourceLang === "en" && singleWord ? getWordHelp(cleanSelection) : {
+    known: false,
+    es: "",
+    pronunciation: text("Escuchar", "Listen"),
+    type: singleWord ? text("palabra", "word") : text("frase", "phrase"),
+    meaning: "",
+    phrase: context,
+    phraseEs: ""
+  };
+  const loadingHelp = {
+    ...localHelp,
+    translated: localHelp.known ? localHelp.es : text("Traduciendo…", "Translating…"),
+    meaning: localHelp.known ? localHelp.meaning : text("Preparando la traducción en el dispositivo.", "Preparing on-device translation."),
+    phrase: context,
+    phraseEs: localHelp.known ? localHelp.phraseEs : text("Traduciendo el contexto…", "Translating context…")
+  };
+  setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: loadingHelp } }, false);
+  try {
+    const nativeHelp = await translateWithContext(cleanSelection, context, sourceLang);
+    if (nativeHelp) {
+      setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: nativeHelp } }, false);
+    } else if (!localHelp.known) {
+      setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
+        ...loadingHelp,
+        translated: text("Disponible en la app móvil", "Available in the mobile app"),
+        meaning: text("La traducción completa usa el modelo sin conexión de Android/iOS.", "Complete translation uses the Android/iOS offline model."),
+        phraseEs: text("Instala el APK para traducir esta selección completa.", "Install the APK to translate this full selection.")
+      } } }, false);
+    }
+  } catch {
+    setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
+      ...loadingHelp,
+      translated: localHelp.known ? localHelp.es : text("Modelo pendiente", "Model pending"),
+      meaning: text("Conéctate una vez para descargar el modelo inglés–español; después funcionará sin conexión.", "Connect once to download the English–Spanish model; afterward it works offline."),
+      phraseEs: text("El modelo todavía no pudo completar la selección.", "The model could not complete the selection yet.")
+    } } }, false);
+  }
+}
+
+async function openFullVerseTranslation(record) {
+  if (!record) return;
+  setState({ modal: { type: "translation-loading" } }, false);
+  try {
+    if (record.featuredId) {
+      const verse = getVerse(record.featuredId);
+      const source = featuredVerseRecord(verse, record.sourceLang);
+      const target = featuredVerseRecord(verse, record.sourceLang === "en" ? "es" : "en");
+      setState({ modal: { type: "verse-translation", source, target } }, false);
+      return;
+    }
+    const targetVersionId = record.sourceLang === "en" ? "mi-biblia" : "kjv";
+    const targetVersion = BIBLE_VERSIONS[targetVersionId];
+    const targetChapter = await getBibleChapter(targetVersionId, record.bookId, record.chapter);
+    const targetText = targetChapter[record.verse];
+    const book = books.find((item) => item.id === record.bookId) || books[0];
+    const target = {
+      ...record,
+      key: `bible:${targetVersionId}:${record.bookId}:${record.chapter}:${record.verse}`,
+      text: targetText,
+      reference: `${book[targetVersion.language]} ${record.chapter}:${record.verse}`,
+      sourceLang: targetVersion.language,
+      version: targetVersionId
+    };
+    setState({ modal: { type: "verse-translation", source: record, target } }, false);
+  } catch {
+    setState({ modal: null }, false);
+    showToast(text("No pudimos abrir la traducción paralela", "We couldn't open the parallel translation"));
+  }
+}
+
+function wrapCanvasText(context, value, maxWidth) {
+  const words = value.split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (context.measureText(candidate).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else line = candidate;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+async function createVerseShareFile(record) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1080;
+  const context = canvas.getContext("2d");
+  const gradient = context.createLinearGradient(0, 0, 1080, 1080);
+  gradient.addColorStop(0, "#173f37");
+  gradient.addColorStop(.62, "#28594c");
+  gradient.addColorStop(1, "#c59d65");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 1080, 1080);
+  context.globalAlpha = .12;
+  context.fillStyle = "#fff6df";
+  context.beginPath(); context.arc(930, 130, 260, 0, Math.PI * 2); context.fill();
+  context.beginPath(); context.arc(120, 1000, 330, 0, Math.PI * 2); context.fill();
+  context.globalAlpha = 1;
+  context.fillStyle = "#f2cc83";
+  context.font = "700 30px Arial";
+  context.letterSpacing = "5px";
+  context.fillText("DUOBIBLIA", 90, 105);
+  context.fillStyle = "#fffdf5";
+  context.font = "56px Georgia";
+  const lines = wrapCanvasText(context, `“${record.text}”`, 880);
+  const lineHeight = 78;
+  const startY = Math.max(250, 520 - (lines.length * lineHeight) / 2);
+  lines.slice(0, 8).forEach((line, index) => context.fillText(line, 90, startY + index * lineHeight));
+  context.fillStyle = "#f2cc83";
+  context.font = "700 34px Arial";
+  context.fillText(record.reference, 90, 890);
+  context.fillStyle = "rgba(255,255,255,.78)";
+  context.font = "24px Arial";
+  context.fillText("Lee · Aprende · Comparte", 90, 955);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png", .94));
+  return blob ? new File([blob], `DuoBiblia-${record.reference.replace(/[^a-z0-9]+/gi, "-")}.png`, { type: "image/png" }) : null;
+}
+
+async function shareVerse(record) {
+  if (!record) return;
+  const shareText = `“${record.text}”\n${record.reference}\n\nDuoBiblia`;
+  try {
+    const file = await createVerseShareFile(record);
+    if (file && navigator.share && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ title: record.reference, text: shareText, files: [file] });
+      return;
+    }
+    if (navigator.share) {
+      await navigator.share({ title: record.reference, text: shareText });
+      return;
+    }
+    await navigator.clipboard.writeText(shareText);
+    showToast(text("Versículo copiado para compartir", "Verse copied for sharing"));
+  } catch (error) {
+    if (error?.name !== "AbortError") showToast(text("No pudimos compartir el versículo", "We couldn't share the verse"));
+  }
+}
+
 async function playPrayerTrack(track = chooseNextTrack(state.currentTrackId)) {
   if (prayerAudio) {
     prayerAudio.pause();
@@ -918,8 +1214,13 @@ app.addEventListener("click", async (event) => {
     navigate(actionTarget.dataset.route);
   } else if (action === "back") {
     navigate(["reader", "chapter", "reading-plan"].includes(state.route) ? "bible" : "home");
-  } else if (action === "open-reader" || action === "read-collection-item") {
+  } else if (action === "open-reader") {
     openReader(actionTarget.dataset.verse);
+  } else if (action === "read-collection-item") {
+    const record = resolveVerseRecord(actionTarget.dataset.verseKey);
+    setState({ modal: null }, false);
+    if (record?.featuredId) openReader(record.featuredId);
+    else if (record) await openBibleChapter(record.bookId, record.chapter, record.verse, record.version);
   } else if (action === "open-prayer") {
     navigate("prayer");
     if (state.musicEnabled) await startPrayerMusic();
@@ -943,56 +1244,70 @@ app.addEventListener("click", async (event) => {
       setState({ bibleVersion: version, fullSearchResults: null });
       if (state.searchQuery) runFullBibleSearch(state.searchQuery);
     }
+  } else if (action === "select-word") {
+    const host = actionTarget.closest("[data-verse-key]");
+    if (!host) return;
+    if (activeSelectionKey && activeSelectionKey !== host.dataset.verseKey) clearSelectionUI();
+    actionTarget.classList.toggle("selected");
+    updateSelectionUI(host);
+  } else if (action === "clear-selection") {
+    clearSelectionUI();
+  } else if (action === "translate-selection") {
+    const host = actionTarget.closest("[data-verse-key]");
+    const selection = [...host.querySelectorAll(".word-token.selected")].map((token) => token.dataset.word).join(" ");
+    const context = host.dataset.verseContext || host.dataset.verseText || selection;
+    const sourceLang = host.dataset.sourceLang || "en";
+    await openContextTranslation(selection, context, sourceLang);
   } else if (action === "translate-word") {
     const word = actionTarget.dataset.word;
-    const sourceLang = actionTarget.closest("[data-source-lang]")?.dataset.sourceLang || "en";
-    const localHelp = sourceLang === "en" ? getWordHelp(word) : {
-      known: false,
-      es: "",
-      pronunciation: text("Escuchar", "Listen"),
-      type: text("palabra", "word"),
-      meaning: "",
-      phrase: word,
-      phraseEs: ""
-    };
-    if (localHelp.known) {
-      setState({ modal: { type: "translation", word, sourceLang, help: localHelp } }, false);
-    } else {
-      const context = actionTarget.closest("[data-verse-context]")?.dataset.verseContext || word;
-      setState({ modal: { type: "translation", word, sourceLang, help: { ...localHelp, translated: text("Traduciendo…", "Translating…"), meaning: text("Preparando la traducción en el dispositivo.", "Preparing on-device translation."), phrase: context, phraseEs: text("Traduciendo el contexto…", "Translating context…") } } }, false);
-      try {
-        const nativeHelp = await translateWithContext(word, context, sourceLang);
-        if (nativeHelp) setState({ modal: { type: "translation", word, sourceLang, help: nativeHelp } }, false);
-        else setState({ modal: { type: "translation", word, sourceLang, help: { ...localHelp, translated: text("Disponible en la app móvil", "Available in the mobile app"), meaning: text("La traducción completa usa el modelo sin conexión de Android/iOS.", "Complete translation uses the Android/iOS offline model."), phrase: context, phraseEs: text("Abre esta selección en Android o iOS para traducir el contexto.", "Open this selection on Android or iOS to translate the context.") } } }, false);
-      } catch (error) {
-        setState({ modal: { type: "translation", word, sourceLang, help: { ...localHelp, translated: text("Modelo pendiente", "Model pending"), meaning: text("Conéctate una vez para descargar el modelo inglés–español; después funcionará sin conexión.", "Connect once to download the English–Spanish model; afterward it works offline."), phrase: context, phraseEs: text("No se pudo descargar el modelo todavía.", "The model could not be downloaded yet.") } } }, false);
-      }
-    }
+    const host = actionTarget.closest("[data-verse-key], [data-verse-context]");
+    await openContextTranslation(word, host?.dataset.verseContext || word, host?.dataset.sourceLang || "en");
   } else if (action === "translate-phrase") {
     const word = actionTarget.dataset.phrase;
     const sourceLang = actionTarget.closest("[data-source-lang]")?.dataset.sourceLang || (state.bibleVersion === "mi-biblia" ? "es" : "en");
     setState({ modal: { type: "translation", word, sourceLang, help: { translated: actionTarget.dataset.translation, pronunciation: text("frase", "phrase"), type: text("expresión", "phrase"), meaning: text("La frase completa conserva un sentido más natural que la suma de palabras aisladas.", "The complete phrase preserves a more natural meaning than isolated words."), phrase: word, phraseEs: actionTarget.dataset.translation } } }, false);
   } else if (action === "translate-verse") {
-    setState({ modal: { type: "verse-translation", verseId: actionTarget.dataset.verse } }, false);
+    await openFullVerseTranslation(recordFromElement(actionTarget));
+  } else if (action === "open-verse-tools") {
+    const record = recordFromElement(actionTarget);
+    setState(withStoredRecord(record, { modal: { type: "verse-tools", record } }), true);
   } else if (action === "close-modal" || action === "close-on-backdrop") {
     if (action === "close-on-backdrop" && !event.target.classList.contains("modal-layer")) return;
     setState({ modal: null, pendingPremium: false, pendingStreakReward: false, authError: null });
   } else if (action === "toggle-favorite") {
-    const id = actionTarget.dataset.verse;
-    const exists = state.favorites.includes(id);
-    const favorites = exists ? state.favorites.filter((item) => item !== id) : [...state.favorites, id];
-    setState({ favorites });
+    const record = recordFromElement(actionTarget);
+    if (!record) return;
+    const exists = state.favorites.includes(record.key);
+    const favorites = exists ? state.favorites.filter((item) => item !== record.key) : [...state.favorites, record.key];
+    setState(withStoredRecord(record, { favorites }));
     showToast(exists ? text("Eliminado de favoritos", "Removed from favorites") : text("Guardado en favoritos", "Saved to favorites"));
   } else if (action === "open-note") {
-    setState({ modal: { type: "note", verseId: actionTarget.dataset.verse } }, false);
+    const record = recordFromElement(actionTarget);
+    if (!record) return;
+    setState(withStoredRecord(record, { modal: { type: "note", record } }), true);
   } else if (action === "save-note") {
     event.preventDefault();
     const value = document.querySelector("#note-text")?.value.trim();
-    const id = actionTarget.dataset.verse;
+    const record = recordFromElement(actionTarget);
+    if (!record) return;
     const notes = { ...state.notes };
-    if (value) notes[id] = value; else delete notes[id];
-    setState({ notes, modal: null });
+    if (value) notes[record.key] = value; else delete notes[record.key];
+    setState(withStoredRecord(record, { notes, modal: null }));
     showToast(text("Nota guardada", "Note saved"));
+  } else if (action === "open-highlight") {
+    const record = recordFromElement(actionTarget);
+    if (!record) return;
+    setState(withStoredRecord(record, { modal: { type: "highlight", record } }), true);
+  } else if (action === "set-highlight") {
+    const record = recordFromElement(actionTarget);
+    if (!record) return;
+    const highlights = { ...state.highlights };
+    if (actionTarget.dataset.color === "none") delete highlights[record.key];
+    else highlights[record.key] = actionTarget.dataset.color;
+    setState(withStoredRecord(record, { highlights, modal: { type: "verse-tools", record } }));
+    showToast(text("Color del versículo actualizado", "Verse color updated"));
+  } else if (action === "share-verse") {
+    await shareVerse(recordFromElement(actionTarget));
   } else if (action === "toggle-audio") {
     state.audioPlaying ? pausePrayerMusic() : await startPrayerMusic();
   } else if (action === "next-track") {
@@ -1206,6 +1521,9 @@ initializePrayerNotifications(async () => {
 }).catch(() => {});
 initializeAuth(handleAuthSession).catch((error) => {
   setState({ authLoading: false, authError: error.message }, false);
+});
+getAuthCapabilities().then((capabilities) => {
+  setState({ googleAuthEnabled: capabilities.google, emailAuthEnabled: capabilities.email }, false);
 });
 checkRequiredUpdate().then((updateRequired) => {
   if (updateRequired) setState({ updateRequired }, false);

@@ -10,7 +10,8 @@ DuoBiblia es una aplicación Android/iOS bilingüe para leer la Biblia, aprender
 - recordatorios locales de oración a las 7:00, 15:00 y 21:30, configurados en el idioma elegido;
 - racha, puntos, meta de 90 días, reto diario y animaciones de logros;
 - lectura completa KJV y **Mi Biblia traducida**, extraída exclusivamente del PDF entregado por el propietario;
-- traducción de palabra, frase o versículo, pronunciación, favoritos y notas;
+- selección de una o varias palabras, traducción contextual de frases o versículos y pronunciación;
+- favoritos, notas, colores y tarjetas gráficas para compartir en cualquier versículo de ambas Biblias;
 - interfaz completa en español e inglés, modo oscuro y transiciones;
 - anuncios AdMob de apertura y de logro; Premium los elimina;
 - cuenta real con Google o código de seis dígitos por correo mediante Supabase;
@@ -98,7 +99,7 @@ Ejemplo:
 
 ```sql
 update public.app_versions
-set latest_version = '1.2.0', minimum_version = '1.2.0', updated_at = now()
+set latest_version = '1.3.0', minimum_version = '1.3.0', updated_at = now()
 where platform = 'android';
 ```
 
@@ -108,7 +109,7 @@ Para distribución directa en Android, aplicar también `supabase/migrations/202
 
 ```powershell
 $env:SUPABASE_SERVICE_ROLE_KEY = "CLAVE_PRIVADA_SOLO_EN_TU_PC"
-./scripts/publish-apk.ps1 -ProjectUrl "https://TU-PROYECTO.supabase.co" -ApkPath "./DuoBiblia-1.2.0.apk" -Version "1.2.0" -MinimumVersion "1.2.0"
+./scripts/publish-apk.ps1 -ProjectUrl "https://TU-PROYECTO.supabase.co" -ApkPath "./DuoBiblia-1.3.0.apk" -Version "1.3.0" -MinimumVersion "1.3.0"
 ```
 
 El script sube primero el APK y solo después cambia la versión obligatoria, evitando dejar instalaciones bloqueadas sin archivo descargable.

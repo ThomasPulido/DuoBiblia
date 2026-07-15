@@ -7,6 +7,8 @@ export function mergeProgress(saved = {}, local = {}) {
     readChapters: Math.max(Number(saved.readChapters) || 0, Number(local.readChapters) || 0),
     lastPrayerDate: [saved.lastPrayerDate, local.lastPrayerDate].filter(Boolean).sort().at(-1) || null,
     favorites: [...new Set([...(saved.favorites || []), ...(local.favorites || [])])],
-    notes: { ...(saved.notes || {}), ...(local.notes || {}) }
+    notes: { ...(saved.notes || {}), ...(local.notes || {}) },
+    highlights: { ...(saved.highlights || {}), ...(local.highlights || {}) },
+    verseRecords: { ...(saved.verseRecords || {}), ...(local.verseRecords || {}) }
   };
 }

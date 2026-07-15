@@ -20,6 +20,18 @@ export const supabase = authConfigured ? createClient(supabaseUrl, supabaseKey, 
   }
 }) : null;
 
+export async function getAuthCapabilities() {
+  if (!authConfigured) return { email: false, google: false };
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/settings`, { headers: { apikey: supabaseKey } });
+    if (!response.ok) return { email: true, google: false };
+    const settings = await response.json();
+    return { email: Boolean(settings.external?.email), google: Boolean(settings.external?.google) };
+  } catch {
+    return { email: true, google: false };
+  }
+}
+
 export async function initializeAuth(onSession) {
   if (!supabase) return () => {};
   const { data } = await supabase.auth.getSession();
