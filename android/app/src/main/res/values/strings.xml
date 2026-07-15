@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DuoBiblia</string>
+    <string name="title_activity_main">DuoBiblia</string>
+    <string name="package_name">com.duobiblia.app</string>
+    <string name="custom_url_scheme">com.duobiblia.app</string>
+    <string name="admob_app_id">ca-app-pub-8007313797348394~1152485477</string>
+</resources>

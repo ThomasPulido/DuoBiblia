@@ -1,0 +1,35 @@
+{
+  "name": "duobiblia",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Aplicación móvil bilingüe para leer la Biblia y aprender idiomas.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4173",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "test": "node --test tests/core.test.mjs",
+    "check": "node --check app.js",
+    "import:kjv": "node scripts/import-kjv.mjs",
+    "native:sync": "vite build && capacitor sync",
+    "native:sync:android": "vite build && capacitor sync android",
+    "android": "capacitor open android",
+    "ios": "capacitor open ios"
+  },
+  "dependencies": {
+    "@capacitor-community/admob": "8.0.0",
+    "@capacitor-mlkit/translation": "8.1.0",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/browser": "^8.0.3",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
+    "@capacitor/local-notifications": "8.0.0",
+    "@supabase/supabase-js": "^2.110.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.0.0",
+    "vite": "8.1.4"
+  }
+}

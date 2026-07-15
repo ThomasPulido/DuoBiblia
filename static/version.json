@@ -1,0 +1,14 @@
+{
+  "latestVersion": "1.1.0",
+  "minimumVersion": "1.1.0",
+  "title": {
+    "es": "Actualización necesaria",
+    "en": "Update required"
+  },
+  "message": {
+    "es": "Instala la versión más reciente para seguir usando DuoBiblia.",
+    "en": "Install the latest version to keep using DuoBiblia."
+  },
+  "androidUrl": "https://play.google.com/store/apps/details?id=com.duobiblia.app",
+  "iosUrl": "https://apps.apple.com/app/id0000000000"
+}

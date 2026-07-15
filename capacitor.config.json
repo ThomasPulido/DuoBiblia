@@ -1,0 +1,19 @@
+{
+  "appId": "com.duobiblia.app",
+  "appName": "DuoBiblia",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1200,
+      "backgroundColor": "#143F3A",
+      "showSpinner": false
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_prayer",
+      "iconColor": "#E9BA5C"
+    }
+  }
+}

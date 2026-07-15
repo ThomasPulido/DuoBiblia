@@ -1,0 +1,18 @@
+{
+  "name": "DuoBiblia - Fe que enseña",
+  "short_name": "DuoBiblia",
+  "description": "Lee la Biblia, fortalece tu fe y aprende inglés palabra por palabra.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f6fa",
+  "theme_color": "#f7f6fa",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./assets/app-logo.png",
+      "sizes": "1536x1536",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
