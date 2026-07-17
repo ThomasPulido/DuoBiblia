@@ -1,5 +1,14 @@
 # Historial de versiones
 
+## 1.8.0 — Traducción bíblica exacta y autoguardado instantáneo
+
+- Las selecciones de tres o más palabras muestran el pasaje exacto de la Biblia integrada en el idioma contrario, sin sustituirlo por una traducción automática.
+- Una o dos palabras conservan el significado literal para ayudar a aprender vocabulario.
+- Notas, favoritos, resaltados, progreso, rachas y preferencias se guardan al instante en dos copias locales y se sincronizan por campo con la cuenta.
+- Los cambios recientes de cada campo prevalecen al combinar este dispositivo con la nube, evitando que regresen notas o colores anteriores.
+- Inicio y traducción más rápidos mediante modelos preparados y caché local reutilizable.
+- Música devocional con mayor volumen y tarjeta de perfil centrada en teléfonos estrechos y anchos.
+
 ## 1.7.0 — Lectura fluida, traducción bíblica y recordatorios confiables
 
 - La oración nocturna usa un límite devocional a las 5:00: completarla después de medianoche ya no bloquea la noche siguiente.

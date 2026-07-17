@@ -2,8 +2,10 @@ import { Capacitor } from "@capacitor/core";
 import { Language, Translation } from "@capacitor-mlkit/translation";
 
 const CACHE_KEY = "duobiblia-translation-cache-v1";
+const MODEL_READY_KEY = "duobiblia-translation-models-ready-v1";
 const MAX_CACHE_ITEMS = 240;
 let modelPreparationPromise = null;
+let modelsMarkedReady = globalThis.localStorage?.getItem(MODEL_READY_KEY) === "true";
 
 function readCache() {
   try {
@@ -24,8 +26,9 @@ function cacheResult(key, value) {
   } catch { /* memory cache remains available */ }
 }
 
-export function prepareTranslationModels() {
+export function prepareTranslationModels(forceCheck = false) {
   if (!Capacitor.isNativePlatform()) return Promise.resolve(false);
+  if (modelsMarkedReady && !forceCheck) return Promise.resolve(true);
   if (modelPreparationPromise) return modelPreparationPromise;
   modelPreparationPromise = (async () => {
     const required = [Language.English, Language.Spanish];
@@ -33,6 +36,8 @@ export function prepareTranslationModels() {
     await Promise.all(required
       .filter((language) => !languages.includes(language))
       .map((language) => Translation.downloadModel({ language })));
+    modelsMarkedReady = true;
+    globalThis.localStorage?.setItem(MODEL_READY_KEY, "true");
     return true;
   })().catch((error) => {
     modelPreparationPromise = null;
@@ -51,11 +56,25 @@ export async function translateWithContext(word, context = word, sourceLang = "e
   await prepareTranslationModels();
   const sourceLanguage = sourceLang === "es" ? Language.Spanish : Language.English;
   const targetLanguage = sourceLang === "es" ? Language.English : Language.Spanish;
-  const wordPromise = Translation.translate({ text: normalizedWord, sourceLanguage, targetLanguage });
-  const contextPromise = normalizedWord === normalizedContext
-    ? wordPromise
-    : Translation.translate({ text: normalizedContext, sourceLanguage, targetLanguage });
-  const [wordResult, contextResult] = await Promise.all([wordPromise, contextPromise]);
+  const translate = () => {
+    const wordPromise = Translation.translate({ text: normalizedWord, sourceLanguage, targetLanguage });
+    const contextPromise = normalizedWord === normalizedContext
+      ? wordPromise
+      : Translation.translate({ text: normalizedContext, sourceLanguage, targetLanguage });
+    return Promise.all([wordPromise, contextPromise]);
+  };
+  let wordResult;
+  let contextResult;
+  try {
+    [wordResult, contextResult] = await translate();
+  } catch (error) {
+    if (!modelsMarkedReady) throw error;
+    modelsMarkedReady = false;
+    globalThis.localStorage?.removeItem(MODEL_READY_KEY);
+    modelPreparationPromise = null;
+    await prepareTranslationModels(true);
+    [wordResult, contextResult] = await translate();
+  }
   const targetIsSpanish = sourceLang === "en";
   const result = {
     translated: wordResult.text,

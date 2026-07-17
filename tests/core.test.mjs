@@ -13,6 +13,7 @@ import { ADMOB_IDS } from "../src/config.mjs";
 import { prayerNotificationSchedule } from "../src/notification-service.mjs";
 import { searchBible } from "../src/bible-service.mjs";
 import { getCompletedBookProgress, getReadingPlanDay, getReadingPlanWeek, READING_PLAN_DAYS, YEAR_READING_PLAN } from "../src/reading-plan.mjs";
+import { selectionWords, translationMode } from "../src/translation-policy.mjs";
 
 test("completar la oración inicia una racha y entrega puntos", () => {
   const result = completeDailyPrayer({ streak: 0, points: 0, lastPrayerDate: null }, new Date(2026, 6, 13, 9));
@@ -90,6 +91,13 @@ test("I y todas las palabras visibles tienen traducción local", () => {
       if (word) assert.ok(wordDictionary[word], `Falta traducción para: ${word}`);
     }
   }
+});
+
+test("una o dos palabras usan significado literal y las frases usan la Biblia paralela", () => {
+  assert.deepEqual(selectionWords("  by   grace "), ["by", "grace"]);
+  assert.equal(translationMode("grace"), "literal");
+  assert.equal(translationMode("by grace"), "literal");
+  assert.equal(translationMode("saved by his grace"), "parallel-passage");
 });
 
 test("el estado de ánimo selecciona un versículo contextual", () => {
@@ -254,6 +262,30 @@ test("el cambio local más reciente de color no es sobrescrito por una copia ant
   assert.equal(merged.progressRevision, 5);
 });
 
+test("el autoguardado por campo conserva a la vez la nota remota y el color local más recientes", () => {
+  const saved = {
+    notes: { verse: "nota remota nueva" },
+    highlights: { verse: "gold" },
+    progressUpdatedAt: "2026-07-17T10:10:00.000Z",
+    fieldUpdatedAt: {
+      notes: "2026-07-17T10:10:00.000Z",
+      highlights: "2026-07-17T10:00:00.000Z"
+    }
+  };
+  const local = {
+    notes: { verse: "nota local antigua" },
+    highlights: { verse: "sage" },
+    progressUpdatedAt: "2026-07-17T10:05:00.000Z",
+    fieldUpdatedAt: {
+      notes: "2026-07-17T10:00:00.000Z",
+      highlights: "2026-07-17T10:05:00.000Z"
+    }
+  };
+  const merged = mergeProgress(saved, local);
+  assert.deepEqual(merged.notes, { verse: "nota remota nueva" });
+  assert.deepEqual(merged.highlights, { verse: "sage" });
+});
+
 test("la nube antigua no puede reponer la oración falsa del día actual", () => {
   const cloudV3 = {
     dataSchemaVersion: 3,
@@ -298,8 +330,8 @@ test("la versión mínima permite bloquear instalaciones antiguas", () => {
   assert.equal(compareVersions("2.0.0", "1.9.9"), 1);
 });
 
-test("la versión 1.7.0 usa el nuevo enlace de Bold y los anuncios iOS entregados", () => {
-  assert.equal(APP_VERSION, "1.7.0");
+test("la versión 1.8.0 usa el nuevo enlace de Bold y los anuncios iOS entregados", () => {
+  assert.equal(APP_VERSION, "1.8.0");
   assert.equal(BOLD_CHECKOUT_URL, "https://checkout.bold.co/payment/LNK_84NNU7YDX9");
   assert.equal(ADMOB_IDS.iosAppId, "ca-app-pub-8007313797348394~9653183215");
   assert.equal(ADMOB_IDS.appOpen.iosProduction, "ca-app-pub-8007313797348394/7027019877");
@@ -314,6 +346,9 @@ test("la interfaz detiene multimedia, traduce tras confirmar la selección y com
   assert.doesNotMatch(appSource, /scheduleAutomaticTranslation/);
   assert.match(appSource, /NativeVerseShare\.shareImage/);
   assert.match(appSource, /devotional-interactive-text/);
+  assert.match(appSource, /STORAGE_BACKUP_KEY/);
+  assert.match(appSource, /audio\.volume = 0\.82/);
+  assert.match(appSource, /translationMode/);
   assert.match(androidShareSource, /Intent\.ACTION_SEND/);
   assert.match(androidShareSource, /image\/png/);
 });

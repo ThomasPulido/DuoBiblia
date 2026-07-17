@@ -1329,3 +1329,34 @@ img, svg, canvas { max-width: 100%; }
   .hero-backdrop span { opacity: 0; animation: none !important; transform: scale(1.08); }
   .hero-backdrop span:nth-child(1) { opacity: 1; }
 }
+
+/* 1.8 — centered account surfaces and visible instant-save feedback. */
+.route-profile .profile-hero {
+  width: 100%;
+  max-width: 484px;
+  margin: 12px auto 0;
+  padding-right: clamp(20px, 6vw, 30px);
+  padding-left: clamp(20px, 6vw, 30px);
+  border-radius: 30px;
+  box-shadow: var(--shadow-md);
+}
+.route-profile .profile-content {
+  width: 100%;
+  max-width: 484px;
+  margin-right: auto;
+  margin-left: auto;
+}
+.account-modal {
+  justify-self: center;
+  margin-right: auto;
+  margin-left: auto;
+}
+.note-autosave-status {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  margin: -7px 0 10px;
+  color: var(--green);
+  font-size: 9px;
+  font-weight: 800;
+}
