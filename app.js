@@ -25,6 +25,7 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import { BIBLE_VERSIONS, getBibleChapter, searchBible } from "./src/bible-service.mjs";
 import { chooseNextTrack, prayerTracks } from "./src/music.mjs";
 import { translateWithContext } from "./src/translation-service.mjs";
+import { selectionWords, translationMode } from "./src/translation-policy.mjs";
 import { authConfigured, claimStreakReward, getAuthCapabilities, getEntitlement, initializeAuth, mergeProgress, sendEmailCode, signInWithGoogle, signOut, syncProgress, verifyEmailCode } from "./src/auth-service.mjs";
 import { externalBillingEnabled, openBoldCheckout } from "./src/billing-service.mjs";
 import { APP_VERSION, checkRequiredUpdate, openRequiredUpdate } from "./src/update-service.mjs";
@@ -33,7 +34,14 @@ import { disablePrayerNotifications, enablePrayerNotifications, initializePrayer
 import { findReadingPlanChapter, getCompletedBookProgress, getReadingPlanDay, getReadingPlanWeek, nextIncompletePlanDay, READING_PLAN_DAYS } from "./src/reading-plan.mjs";
 
 const STORAGE_KEY = "duobiblia-state-v1";
-const DATA_SCHEMA_VERSION = 4;
+const STORAGE_BACKUP_KEY = "duobiblia-state-backup-v1";
+const DATA_SCHEMA_VERSION = 5;
+const PERSISTED_PROGRESS_FIELDS = [
+  "streak", "points", "lastPrayerDate", "lastPrayerCompletedAt", "prayerCompletions",
+  "favorites", "notes", "highlights", "verseRecords", "completedPlanDays", "moodDate",
+  "quizCompleted", "quizAnswer", "lastQuizDate", "lastQuizAdDate", "dailyQuizDate",
+  "dailyQuizAnswers", "dailyQuizCompleted", "quizStats", "uiLang", "bibleVersion"
+];
 const initialState = {
   dataSchemaVersion: DATA_SCHEMA_VERSION,
   phase: "splash",
@@ -79,6 +87,7 @@ const initialState = {
   activePlanDay: null,
   progressUpdatedAt: null,
   progressRevision: 0,
+  fieldUpdatedAt: {},
   audioPlaying: false,
   musicEnabled: true,
   currentTrackId: null,
@@ -111,7 +120,7 @@ const opposite = () => state.uiLang === "es" ? "en" : "es";
 
 function loadState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    const saved = readLatestSavedState();
     const restored = { ...initialState, ...(saved || {}), phase: "splash", modal: null, audioPlaying: false };
     restored.completedPlanDays = [...new Set((restored.completedPlanDays || [])
       .map(Number)
@@ -149,6 +158,15 @@ function loadState() {
       restored.progressUpdatedAt = new Date().toISOString();
       restored.progressRevision = (Number(restored.progressRevision) || 0) + 1;
     }
+    restored.fieldUpdatedAt = { ...(restored.fieldUpdatedAt || {}) };
+    if (saved && savedSchema < 5) {
+      const migratedAt = restored.progressUpdatedAt || new Date().toISOString();
+      for (const field of PERSISTED_PROGRESS_FIELDS) {
+        if (!(field in restored.fieldUpdatedAt)) restored.fieldUpdatedAt[field] = migratedAt;
+      }
+      restored.progressUpdatedAt = migratedAt;
+      restored.progressRevision = (Number(restored.progressRevision) || 0) + 1;
+    }
     restored.dataSchemaVersion = DATA_SCHEMA_VERSION;
     if (!restored.premiumUntil || new Date(restored.premiumUntil) <= new Date()) restored.premium = false;
     if (restored.dailyQuizDate !== dateKey()) {
@@ -164,9 +182,28 @@ function loadState() {
   }
 }
 
+function readStoredState(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function readLatestSavedState() {
+  const candidates = [readStoredState(STORAGE_KEY), readStoredState(STORAGE_BACKUP_KEY)].filter(Boolean);
+  return candidates.sort((left, right) => {
+    const revisionDifference = (Number(right.progressRevision) || 0) - (Number(left.progressRevision) || 0);
+    if (revisionDifference) return revisionDifference;
+    return (Date.parse(right.progressUpdatedAt || "") || 0) - (Date.parse(left.progressUpdatedAt || "") || 0);
+  })[0] || null;
+}
+
 function persist() {
   const { phase, modal, audioPlaying, kjvChapter, kjvLoading, kjvError, fullSearchResults, fullSearchLoading, authUser, authLoading, authError, pendingPremium, updateRequired, ...persistable } = state;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+  const payload = JSON.stringify(persistable);
+  localStorage.setItem(STORAGE_KEY, payload);
+  localStorage.setItem(STORAGE_BACKUP_KEY, payload);
 }
 
 function progressStateSignature(value) {
@@ -195,29 +232,51 @@ function progressStateSignature(value) {
   });
 }
 
-function setState(update, shouldPersist = true) {
+function changedProgressFields(previous, next) {
+  return PERSISTED_PROGRESS_FIELDS.filter((field) => JSON.stringify(previous[field]) !== JSON.stringify(next[field]));
+}
+
+function scheduleProgressSync(delay = 250) {
+  if (!state.authUser) return;
+  clearTimeout(progressSyncTimer);
+  progressSyncTimer = setTimeout(() => {
+    progressSyncTimer = null;
+    syncProgress(state.authUser, progressForSync()).catch(() => {});
+  }, delay);
+}
+
+function flushProgressSync() {
+  clearTimeout(progressSyncTimer);
+  progressSyncTimer = null;
+  if (!state.authUser) return Promise.resolve(null);
+  return syncProgress(state.authUser, progressForSync()).catch(() => null);
+}
+
+function setState(update, shouldPersist = true, shouldRender = true) {
+  const previousPremium = state.premium;
   const previousSignature = progressStateSignature(state);
   const patch = typeof update === "function" ? update(state) : update;
   let nextState = { ...state, ...patch };
   const progressChanged = previousSignature !== progressStateSignature(nextState);
   const localProgressMutation = shouldPersist && progressChanged && !("progressUpdatedAt" in patch);
   if (localProgressMutation) {
+    const mutationTime = new Date().toISOString();
+    const fieldUpdatedAt = { ...(state.fieldUpdatedAt || {}) };
+    for (const field of changedProgressFields(state, nextState)) fieldUpdatedAt[field] = mutationTime;
     nextState = {
       ...nextState,
-      progressUpdatedAt: new Date().toISOString(),
-      progressRevision: (Number(state.progressRevision) || 0) + 1
+      progressUpdatedAt: mutationTime,
+      progressRevision: (Number(state.progressRevision) || 0) + 1,
+      fieldUpdatedAt
     };
   }
   state = nextState;
   if (shouldPersist) {
     persist();
-    if (state.authUser && localProgressMutation) {
-      clearTimeout(progressSyncTimer);
-      progressSyncTimer = setTimeout(() => syncProgress(state.authUser, progressForSync()).catch(() => {}), 900);
-    }
+    if (localProgressMutation) scheduleProgressSync();
   }
-  syncNativePremiumState(state.premium).catch(() => {});
-  render();
+  if (state.premium !== previousPremium) syncNativePremiumState(state.premium).catch(() => {});
+  if (shouldRender) render();
 }
 
 persist();
@@ -378,8 +437,8 @@ function renderSelectionBar() {
   return `<div class="selection-toolbar" aria-live="polite"><span class="selection-preview"></span><button data-action="translate-selection">${icon("translate")}<b>${text("Traducir", "Translate")}</b></button><button class="selection-clear" data-action="clear-selection" aria-label="${text("Limpiar selección", "Clear selection")}">${icon("close")}</button></div>`;
 }
 
-function selectionHostAttributes(key, value, sourceLang = state.uiLang) {
-  return `data-verse-key="${escapeHtml(key)}" data-verse-text="${escapeHtml(value)}" data-source-lang="${sourceLang}" data-verse-context="${escapeHtml(value)}"`;
+function selectionHostAttributes(key, value, sourceLang = state.uiLang, parallelText = "", parallelReference = "") {
+  return `data-verse-key="${escapeHtml(key)}" data-verse-text="${escapeHtml(value)}" data-source-lang="${sourceLang}" data-verse-context="${escapeHtml(value)}" data-parallel-text="${escapeHtml(parallelText)}" data-parallel-reference="${escapeHtml(parallelReference)}"`;
 }
 
 function renderVerseTools(record, compact = false) {
@@ -834,14 +893,14 @@ function renderPrayer() {
         <p class="devotional-secondary scripture-secondary" lang="${secondaryLang}">${escapeHtml(verse[secondaryLang])}</p>
         ${renderVerseTools(verseRecord)}
       </section>
-      <section class="devotional-section meditation-section" ${selectionHostAttributes(`devotional:${dateKey()}:meditation:${state.uiLang}`, prayer.meditation[state.uiLang], state.uiLang)}>
+      <section class="devotional-section meditation-section" ${selectionHostAttributes(`devotional:${dateKey()}:meditation:${state.uiLang}`, prayer.meditation[state.uiLang], state.uiLang, prayer.meditation[opposite()], text("Meditación", "Meditation"))}>
         <span class="section-number">02</span><p class="eyebrow">${dualText("MEDITACIÓN", "MEDITATION")}</p>
         <h2>${dualObject(prayer.meditationTitle)}</h2>
         <p class="devotional-interactive-text">${renderInteractiveText(prayer.meditation[state.uiLang])}</p>
         ${renderSelectionBar()}
         <blockquote class="devotional-secondary" lang="${opposite()}">${escapeHtml(prayer.meditation[opposite()])}</blockquote>
       </section>
-      <section class="devotional-section pray-section" ${selectionHostAttributes(`devotional:${dateKey()}:prayer:${state.uiLang}`, prayer.prayer[state.uiLang], state.uiLang)}>
+      <section class="devotional-section pray-section" ${selectionHostAttributes(`devotional:${dateKey()}:prayer:${state.uiLang}`, prayer.prayer[state.uiLang], state.uiLang, prayer.prayer[opposite()], text("Oración", "Prayer"))}>
         <span class="section-number">03</span><p class="eyebrow">${dualText("OREMOS", "LET US PRAY")}</p>
         <h2>${dualObject(prayer.prayerTitle)}</h2>
         <p class="devotional-interactive-text">${renderInteractiveText(prayer.prayer[state.uiLang])}</p>
@@ -996,7 +1055,7 @@ function renderModal() {
   if (state.modal.type === "note") {
     const record = state.modal.record || resolveVerseRecord(state.modal.verseKey || state.modal.verseId);
     if (!record) return "";
-    return `<div class="modal-layer"><form class="modal-card note-modal" id="note-form" ${verseHostAttributes(record)}>${close}<span class="modal-icon">${icon("note")}</span><p class="eyebrow">${dualText("NOTA PERSONAL", "PERSONAL NOTE")}</p><h2>${escapeHtml(record.reference)}</h2><p class="note-verse">“${escapeHtml(record.text)}”</p><label>${dualText("¿Qué quieres recordar?", "What do you want to remember?")}<textarea id="note-text" maxlength="500" placeholder="${text("Escribe tu reflexión...", "Write your reflection...")}">${escapeHtml(state.notes[record.key] || "")}</textarea></label><button class="primary-button" data-action="save-note">${dualText("Guardar nota", "Save note")}</button></form></div>`;
+    return `<div class="modal-layer"><form class="modal-card note-modal" id="note-form" ${verseHostAttributes(record)}>${close}<span class="modal-icon">${icon("note")}</span><p class="eyebrow">${dualText("NOTA PERSONAL", "PERSONAL NOTE")}</p><h2>${escapeHtml(record.reference)}</h2><p class="note-verse">“${escapeHtml(record.text)}”</p><label>${dualText("¿Qué quieres recordar?", "What do you want to remember?")}<textarea id="note-text" maxlength="500" placeholder="${text("Escribe tu reflexión...", "Write your reflection...")}">${escapeHtml(state.notes[record.key] || "")}</textarea></label><small class="note-autosave-status" id="note-autosave-status">${dualText("Se guarda automáticamente", "Saved automatically")}</small><button class="primary-button" data-action="save-note">${dualText("Listo", "Done")}</button></form></div>`;
   }
   if (state.modal.type === "streak") {
     return `<div class="modal-layer streak-layer"><div class="modal-card streak-celebration">${close}<div class="confetti"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="big-flame">${icon("flame")}</div><p class="eyebrow">${text("ORACIÓN COMPLETADA", "PRAYER COMPLETE")}</p><h2>${state.streak} ${text("días de racha", "day streak")}</h2><p>${text("Hoy elegiste comenzar con paz. Tu constancia está formando algo hermoso.", "Today you chose to begin in peace. Your consistency is shaping something beautiful.")}</p><div class="premium-progress"><div><span>${state.streak}</span><b>/ ${STREAK_GOAL}</b></div><div class="progress-track"><span style="width:${progressPercent(state.streak)}%"></span></div><small>${state.streak >= STREAK_GOAL ? text("¡Ganaste 1 mes Premium gratis!", "You earned 1 free Premium month!") : text(`${STREAK_GOAL - state.streak} días para 1 mes Premium gratis`, `${STREAK_GOAL - state.streak} days to 1 free Premium month`)}</small></div><span class="points-earned">${icon("star")} +50 XP</span>${state.streak >= STREAK_GOAL && !state.premium ? `<button class="primary-button" data-action="claim-streak-reward">${text("Reclamar mi mes gratis", "Claim my free month")}</button>` : ""}<button class="secondary-button" data-action="close-streak">${text("Continuar mi día", "Continue my day")}</button></div></div>`;
@@ -1058,7 +1117,8 @@ function progressForSync() {
     uiLang: state.uiLang,
     bibleVersion: state.bibleVersion,
     progressUpdatedAt: state.progressUpdatedAt,
-    progressRevision: state.progressRevision
+    progressRevision: state.progressRevision,
+    fieldUpdatedAt: state.fieldUpdatedAt
   };
 }
 
@@ -1104,6 +1164,7 @@ async function handleAuthSession(session) {
       quizStats: syncedProgress.quizStats || state.quizStats,
       progressUpdatedAt: syncedProgress.progressUpdatedAt || state.progressUpdatedAt,
       progressRevision: syncedProgress.progressRevision ?? state.progressRevision,
+      fieldUpdatedAt: syncedProgress.fieldUpdatedAt || state.fieldUpdatedAt,
       authLoading: false,
       authError: null,
       modal: state.pendingPremium || state.pendingStreakReward ? { type: "premium" } : (completingAuth ? { type: "account-success" } : state.modal),
@@ -1276,65 +1337,94 @@ function attachParallelPassage(help, parallel, context) {
   };
 }
 
-async function openContextTranslation(selection, context, sourceLang = "en", record = null) {
-  const cleanSelection = selection.trim();
-  if (!cleanSelection) return;
-  const singleWord = !/\s/.test(cleanSelection);
-  const localHelp = sourceLang === "en" && singleWord ? getWordHelp(cleanSelection) : {
-    known: false,
-    es: "",
+function localLiteralHelp(selection, sourceLang) {
+  const words = selectionWords(selection);
+  const helps = sourceLang === "en" ? words.map((word) => getWordHelp(word)) : [];
+  const known = helps.length === words.length && helps.every((help) => help.known);
+  const translated = known ? helps.map((help) => help.es).join(" ") : "";
+  return {
+    known,
+    es: translated,
+    translated,
     pronunciation: text("Escuchar", "Listen"),
-    type: singleWord ? text("palabra", "word") : text("frase", "phrase"),
-    meaning: "",
-    phrase: context,
-    phraseEs: ""
+    type: text("significado literal", "literal meaning"),
+    meaning: known
+      ? text("Significado literal de la palabra o de las dos palabras seleccionadas.", "Literal meaning of the selected word or two-word selection.")
+      : text("Preparando el significado literal en el dispositivo.", "Preparing the literal meaning on this device."),
+    phrase: selection,
+    phraseEs: translated || text("Traduciendo…", "Translating…")
   };
-  const loadingHelp = {
-    ...localHelp,
-    translated: localHelp.known ? localHelp.es : text("Traduciendo…", "Translating…"),
-    meaning: localHelp.known ? localHelp.meaning : text("Preparando la traducción en el dispositivo.", "Preparing on-device translation."),
-    phrase: context,
-    phraseEs: localHelp.known ? localHelp.phraseEs : text("Traduciendo el contexto…", "Translating context…")
-  };
-  setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: loadingHelp } }, false);
-  const parallelPromise = getParallelVerseRecord(record).catch(() => null);
-  const sameAsVerse = cleanSelection.replace(/\s+/g, " ").trim() === String(context).replace(/\s+/g, " ").trim();
-  try {
-    const parallel = await parallelPromise;
-    if (parallel) {
-      const exactHelp = attachParallelPassage(loadingHelp, parallel, context);
-      if (sameAsVerse) {
+}
+
+async function openContextTranslation(selection, context, sourceLang = "en", record = null, suppliedParallel = null) {
+  const cleanSelection = selection.trim();
+  const mode = translationMode(cleanSelection);
+  if (mode === "empty") return;
+
+  if (mode === "parallel-passage") {
+    const loadingHelp = {
+      translated: text("Abriendo la Biblia paralela…", "Opening the parallel Bible…"),
+      pronunciation: text("Texto bíblico", "Bible text"),
+      type: text("pasaje bíblico", "Bible passage"),
+      meaning: text("Buscando el texto exacto en la Biblia del idioma contrario.", "Finding the exact text in the Bible of the opposite language."),
+      phrase: context,
+      phraseEs: ""
+    };
+    setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: loadingHelp } }, false);
+    try {
+      const parallel = suppliedParallel?.text ? suppliedParallel : await getParallelVerseRecord(record);
+      if (parallel?.text) {
         setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
-          ...exactHelp,
+          ...attachParallelPassage(loadingHelp, parallel, context),
           translated: parallel.text,
           pronunciation: text("Texto bíblico", "Bible text"),
-          type: text("traducción integrada", "integrated translation"),
-          meaning: text("Este texto proviene exactamente de la Biblia paralela integrada, no de una traducción literal automática.", "This text comes directly from the integrated parallel Bible, not from an automatic literal translation.")
+          type: text("Biblia en el idioma contrario", "Bible in the opposite language"),
+          meaning: text("Resultado tomado del pasaje bíblico paralelo integrado; no es una traducción automática palabra por palabra.", "Result taken from the integrated parallel Bible passage; it is not an automatic word-for-word translation.")
         } } }, false);
         return;
       }
-      setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: exactHelp } }, false);
-    }
-    // Known English words use the curated biblical meaning immediately. The
-    // offline model remains available for unknown words and selected phrases.
-    if (localHelp.known) return;
-    const nativeHelp = await translateWithContext(cleanSelection, context, sourceLang);
-    if (nativeHelp) {
-      setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: attachParallelPassage(nativeHelp, parallel, context) } }, false);
-    } else if (!localHelp.known) {
+    } catch { /* use the on-device fallback below */ }
+
+    try {
+      const fallback = await translateWithContext(cleanSelection, cleanSelection, sourceLang);
+      if (fallback) {
+        setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: fallback } }, false);
+      } else {
+        setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
+          ...loadingHelp,
+          translated: text("Pasaje no disponible", "Passage unavailable"),
+          meaning: text("No encontramos todavía el pasaje paralelo para este texto.", "The parallel passage for this text is not available yet.")
+        } } }, false);
+      }
+    } catch {
       setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
-        ...attachParallelPassage(loadingHelp, parallel, context),
-        translated: text("Disponible en la app móvil", "Available in the mobile app"),
-        meaning: text("La traducción completa usa el modelo sin conexión de Android/iOS.", "Complete translation uses the Android/iOS offline model."),
-        phraseEs: text("Instala el APK para traducir esta selección completa.", "Install the APK to translate this full selection.")
+        ...loadingHelp,
+        translated: text("Pasaje no disponible", "Passage unavailable"),
+        meaning: text("No encontramos todavía el pasaje paralelo para este texto.", "The parallel passage for this text is not available yet.")
+      } } }, false);
+    }
+    return;
+  }
+
+  const localHelp = localLiteralHelp(cleanSelection, sourceLang);
+  setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: localHelp } }, false);
+  if (localHelp.known) return;
+  try {
+    // One or two words are intentionally translated without the full verse.
+    // This avoids a second model request and preserves the requested literal meaning.
+    const nativeHelp = await translateWithContext(cleanSelection, cleanSelection, sourceLang);
+    if (nativeHelp) {
+      setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
+        ...nativeHelp,
+        type: text("significado literal", "literal meaning"),
+        meaning: text("Significado literal de la palabra o de las dos palabras seleccionadas.", "Literal meaning of the selected word or two-word selection.")
       } } }, false);
     }
   } catch {
     setState({ modal: { type: "translation", word: cleanSelection, sourceLang, help: {
-      ...attachParallelPassage(loadingHelp, await parallelPromise, context),
-      translated: localHelp.known ? localHelp.es : text("Modelo pendiente", "Model pending"),
-      meaning: text("Conéctate una vez para descargar el modelo inglés–español; después funcionará sin conexión.", "Connect once to download the English–Spanish model; afterward it works offline."),
-      phraseEs: text("El modelo todavía no pudo completar la selección.", "The model could not complete the selection yet.")
+      ...localHelp,
+      translated: text("Modelo pendiente", "Model pending"),
+      meaning: text("Conéctate una vez para descargar el diccionario inglés–español; después funcionará sin conexión.", "Connect once to download the English–Spanish dictionary; afterward it works offline.")
     } } }, false);
   }
 }
@@ -1447,7 +1537,7 @@ async function playPrayerTrack(track = chooseNextTrack(state.currentTrackId)) {
     prayerAudio.removeAttribute("src");
   }
   const audio = new Audio(track.src);
-  audio.volume = 0.32;
+  audio.volume = 0.82;
   audio.preload = "auto";
   audio.addEventListener("ended", () => {
     if (state.musicEnabled && state.route === "prayer") playPrayerTrack();
@@ -1572,13 +1662,19 @@ app.addEventListener("click", async (event) => {
     const selection = [...host.querySelectorAll(".word-token.selected")]
       .map((token) => token.dataset.word)
       .join(" ");
-    await openContextTranslation(selection, host.dataset.verseContext || host.dataset.verseText || selection, host.dataset.sourceLang || "en", recordFromElement(host));
+    const suppliedParallel = host.dataset.parallelText
+      ? { text: host.dataset.parallelText, reference: host.dataset.parallelReference || text("Texto paralelo", "Parallel text") }
+      : null;
+    await openContextTranslation(selection, host.dataset.verseContext || host.dataset.verseText || selection, host.dataset.sourceLang || "en", recordFromElement(host), suppliedParallel);
   } else if (action === "clear-selection") {
     clearSelectionUI();
   } else if (action === "translate-word") {
     const word = actionTarget.dataset.word;
     const host = actionTarget.closest("[data-verse-key], [data-verse-context]");
-    await openContextTranslation(word, host?.dataset.verseContext || word, host?.dataset.sourceLang || "en", recordFromElement(host));
+    const suppliedParallel = host?.dataset.parallelText
+      ? { text: host.dataset.parallelText, reference: host.dataset.parallelReference || text("Texto paralelo", "Parallel text") }
+      : null;
+    await openContextTranslation(word, host?.dataset.verseContext || word, host?.dataset.sourceLang || "en", recordFromElement(host), suppliedParallel);
   } else if (action === "translate-phrase") {
     const word = actionTarget.dataset.phrase;
     const sourceLang = actionTarget.closest("[data-source-lang]")?.dataset.sourceLang || (state.bibleVersion === "mi-biblia" ? "es" : "en");
@@ -1841,6 +1937,18 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("input", (event) => {
+  if (event.target.id === "note-text") {
+    const record = recordFromElement(event.target);
+    if (!record) return;
+    const notes = { ...state.notes };
+    const value = event.target.value;
+    if (value.trim()) notes[record.key] = value;
+    else delete notes[record.key];
+    setState(withStoredRecord(record, { notes }), true, false);
+    const status = document.querySelector("#note-autosave-status");
+    if (status) status.innerHTML = dualText("Guardado ahora", "Saved now");
+    return;
+  }
   if (event.target.id !== "bible-search") return;
   const value = event.target.value;
   state.searchQuery = value;
@@ -1869,6 +1977,8 @@ window.addEventListener("keydown", (event) => {
 MobileApp.addListener("appStateChange", ({ isActive }) => {
   if (!isActive) {
     suspendActiveMedia();
+    persist();
+    flushProgressSync();
     return;
   }
   if (state.dailyQuizDate !== dateKey()) {
@@ -1878,9 +1988,17 @@ MobileApp.addListener("appStateChange", ({ isActive }) => {
 }).catch(() => {});
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) suspendActiveMedia();
+  if (document.hidden) {
+    suspendActiveMedia();
+    persist();
+    flushProgressSync();
+  }
 });
-window.addEventListener("pagehide", suspendActiveMedia);
+window.addEventListener("pagehide", () => {
+  suspendActiveMedia();
+  persist();
+  flushProgressSync();
+});
 
 render();
 syncNativePremiumState(state.premium).catch(() => {});
@@ -1906,7 +2024,7 @@ setTimeout(() => {
   state.phase = !state.onboarded ? "onboarding" : (moodSeenToday ? "app" : "mood");
   if (state.phase === "app" && state.route === "chapter") openBibleChapter(state.selectedBookId, state.selectedChapter, state.selectedKjvVerse, state.bibleVersion);
   else render();
-}, 1600);
+}, 900);
 
 if (import.meta.env.PROD && "serviceWorker" in navigator && location.protocol.startsWith("http")) {
   window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
