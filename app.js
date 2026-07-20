@@ -1,6 +1,7 @@
 import {
   STREAK_GOAL,
   books,
+  claimDailyOpen,
   completePrayer,
   dateKey,
   featuredVerses,
@@ -17,7 +18,7 @@ import {
   searchFeatured,
   topics
 } from "./src/core.mjs";
-import { getAnnualDevotional } from "./src/daily-content.mjs";
+import { getAnnualDailyVerse, getAnnualDevotional } from "./src/daily-content.mjs";
 import { getDailyQuizSet } from "./src/annual-quizzes.mjs";
 import { initializeMobileAds, showAchievementInterstitial, showAdPrivacyOptions } from "./src/ads.mjs";
 import { App as MobileApp } from "@capacitor/app";
@@ -34,15 +35,17 @@ import { disablePrayerNotifications, enablePrayerNotifications, initializePrayer
 import { findReadingPlanChapter, getCompletedBookProgress, getReadingPlanDay, getReadingPlanWeek, nextIncompletePlanDay, READING_PLAN_DAYS } from "./src/reading-plan.mjs";
 import { DEVOTIONAL_DAYS, DEVOTIONAL_SUBTITLE, DEVOTIONAL_TITLE, devotionalIndexForDate, getDailyYouthDevotionalPreview, getYouthDevotionalPreview } from "./src/devotional-calendar.mjs";
 import { openAccountDeletionPage, openPrivacyPolicy } from "./src/legal-service.mjs";
+import { openNotificationSettings, setPrayerKeepAwake } from "./src/native-experience.mjs";
 
 const STORAGE_KEY = "duobiblia-state-v1";
 const STORAGE_BACKUP_KEY = "duobiblia-state-backup-v1";
-const DATA_SCHEMA_VERSION = 6;
+const DATA_SCHEMA_VERSION = 7;
 const PERSISTED_PROGRESS_FIELDS = [
-  "streak", "points", "lastPrayerDate", "lastPrayerCompletedAt", "prayerCompletions",
+  "streak", "points", "lastOpenDate", "lastOpenAt", "lastPrayerDate", "lastPrayerCompletedAt", "prayerCompletions",
   "favorites", "notes", "highlights", "verseRecords", "completedPlanDays", "moodDate",
   "quizCompleted", "quizAnswer", "lastQuizDate", "lastQuizAdDate", "dailyQuizDate",
-  "dailyQuizAnswers", "dailyQuizCompleted", "quizStats", "completedDevotionalDays", "devotionalDay", "uiLang", "bibleVersion"
+  "dailyQuizAnswers", "dailyQuizCompleted", "quizStats", "completedDevotionalDays", "devotionalDay", "uiLang", "bibleVersion",
+  "subtitleScale", "subtitleOnboardingDone"
 ];
 const initialState = {
   dataSchemaVersion: DATA_SCHEMA_VERSION,
@@ -64,6 +67,8 @@ const initialState = {
   dark: false,
   streak: 0,
   points: 0,
+  lastOpenDate: null,
+  lastOpenAt: null,
   lastPrayerDate: null,
   lastPrayerCompletedAt: null,
   prayerCompletions: {},
@@ -98,6 +103,8 @@ const initialState = {
   audioPlaying: false,
   musicEnabled: true,
   currentTrackId: null,
+  subtitleScale: 1.15,
+  subtitleOnboardingDone: false,
   authUser: null,
   authLoading: false,
   authError: null,
@@ -109,16 +116,21 @@ const initialState = {
   pendingStreakReward: false,
   notificationPromptSeen: false,
   notificationsEnabled: false,
+  notificationSettingsPending: false,
   updateRequired: null,
   modal: null
 };
 
 let state = loadState();
 let prayerAudio = null;
+let prayerAudioContext = null;
+let prayerAudioSource = null;
+let prayerAudioGain = null;
 let progressSyncTimer = null;
 let devotionalLoadPromise = null;
 let prayerOpenedFromNotification = false;
 let activeSelectionKey = null;
+let prayerKeepAwakeRequested = false;
 const NativeVerseShare = registerPlugin("VerseShare");
 const app = document.querySelector("#app");
 const toastRegion = document.querySelector("#toast-region");
@@ -144,6 +156,8 @@ function loadState() {
     restored.dailyQuizAnswers = { language: null, bible: null, ...(restored.dailyQuizAnswers || {}) };
     restored.dailyQuizCompleted = { language: false, bible: false, ...(restored.dailyQuizCompleted || {}) };
     restored.quizStats = { answered: 0, correct: 0, wordsLearned: 0, ...(restored.quizStats || {}) };
+    restored.subtitleScale = Math.max(.9, Math.min(1.7, Number(restored.subtitleScale) || 1.15));
+    restored.subtitleOnboardingDone = Boolean(restored.subtitleOnboardingDone);
     const savedSchema = Number(saved?.dataSchemaVersion) || 0;
     if (savedSchema < 3) {
       restored.completedPlanDays = [];
@@ -243,7 +257,11 @@ function progressStateSignature(value) {
     dailyQuizCompleted: value.dailyQuizCompleted,
     quizStats: value.quizStats,
     uiLang: value.uiLang,
-    bibleVersion: value.bibleVersion
+    bibleVersion: value.bibleVersion,
+    lastOpenDate: value.lastOpenDate,
+    lastOpenAt: value.lastOpenAt,
+    subtitleScale: value.subtitleScale,
+    subtitleOnboardingDone: value.subtitleOnboardingDone
   });
 }
 
@@ -292,6 +310,14 @@ function setState(update, shouldPersist = true, shouldRender = true) {
   }
   if (state.premium !== previousPremium) syncNativePremiumState(state.premium).catch(() => {});
   if (shouldRender) render();
+  syncPrayerKeepAwake();
+}
+
+function syncPrayerKeepAwake() {
+  const requested = state.phase === "app" && state.route === "prayer" && !document.hidden;
+  if (requested === prayerKeepAwakeRequested) return;
+  prayerKeepAwakeRequested = requested;
+  setPrayerKeepAwake(requested).catch(() => {});
 }
 
 persist();
@@ -355,13 +381,15 @@ function spotIllustration(name, extraClass = "") {
 
 function featuredVerseRecord(verse, sourceLang = state.uiLang) {
   const language = sourceLang === "es" ? "es" : "en";
+  const version = language === "en" ? "kjv" : "mi-biblia";
+  const isFeatured = featuredVerses.some((item) => item.id === verse.id);
   return {
-    key: verse.id,
-    featuredId: verse.id,
+    key: isFeatured ? verse.id : `bible:${version}:${verse.book.id}:${verse.chapter}:${verse.verse}`,
+    featuredId: isFeatured ? verse.id : "",
     text: verse[language],
     reference: verse.reference[language],
     sourceLang: language,
-    version: language === "en" ? "kjv" : "mi-biblia",
+    version,
     bookId: verse.book.id,
     chapter: verse.chapter,
     verse: verse.verse
@@ -476,6 +504,7 @@ function renderVerseTools(record, compact = false) {
 
 function render() {
   document.documentElement.lang = state.uiLang;
+  document.documentElement.style.setProperty("--subtitle-scale", String(state.subtitleScale || 1.15));
   document.body.classList.toggle("dark", state.dark);
   document.querySelector('meta[name="theme-color"]').setAttribute("content", state.dark ? "#102c29" : "#f8f3e8");
 
@@ -492,8 +521,12 @@ function render() {
     app.innerHTML = renderOnboarding();
     return;
   }
+  if (state.phase === "subtitle-setup") {
+    app.innerHTML = renderSubtitleSetup();
+    return;
+  }
   if (state.phase === "mood") {
-    app.innerHTML = renderMoodCheck();
+    app.innerHTML = `${renderShell({ includeModal: false, forceRoute: "home" })}${renderMoodCheck()}`;
     return;
   }
   app.innerHTML = renderShell();
@@ -547,11 +580,31 @@ function renderOnboarding() {
     </main>`;
 }
 
+function renderSubtitleSetup() {
+  const percent = Math.round((Number(state.subtitleScale) || 1.15) * 100);
+  return `<main class="subtitle-setup-screen">
+    <section class="subtitle-setup-card">
+      <span class="subtitle-setup-icon">${icon("translate")}</span>
+      <p class="eyebrow">${dualText("LECTURA CÓMODA", "COMFORTABLE READING")}</p>
+      <h1>${dualText("Elige el tamaño de los subtítulos", "Choose subtitle size")}</h1>
+      <p>${dualText("Mueve la barra hasta que puedas leer ambos idiomas sin esfuerzo.", "Move the slider until you can read both languages comfortably.")}</p>
+      <div class="subtitle-example" aria-live="polite">
+        <strong>${text("La paz de Dios te acompaña.", "God's peace walks with you.")}</strong>
+        <small>${text("God's peace walks with you.", "La paz de Dios te acompaña.")}</small>
+      </div>
+      <label class="subtitle-slider-label" for="subtitle-size-onboarding"><span>A</span><input id="subtitle-size-onboarding" type="range" min="0.9" max="1.7" step="0.1" value="${state.subtitleScale}"/><span>A</span></label>
+      <output id="subtitle-size-value">${percent}%</output>
+      <button class="primary-button" data-action="continue-subtitle">${dualText("Continuar", "Continue")}</button>
+      <small class="subtitle-setup-note">${dualText("Podrás cambiarlo después en Perfil · Preferencias.", "You can change it later in Profile · Preferences.")}</small>
+    </section>
+  </main>`;
+}
+
 function renderMoodCheck() {
   return `
-    <main class="mood-screen">
+    <main class="mood-screen mood-overlay">
       <header class="simple-header">
-        <img src="./assets/app-logo.png" alt="DuoBiblia" />
+        <span class="mood-brand">DuoBiblia</span>
         <button class="text-button" data-action="skip-mood">${dualText("Omitir", "Skip")}</button>
       </header>
       <div class="mood-heading">
@@ -570,15 +623,20 @@ function renderMoodCheck() {
     </main>`;
 }
 
-function renderShell() {
-  const deepRoute = ["prayer", "reader", "chapter", "topics", "reading-plan", "devotional"].includes(state.route);
-  return `
-    <div class="app-shell">
+function renderShell({ includeModal = true, forceRoute = null } = {}) {
+  const activeRoute = forceRoute || state.route;
+  const previousRoute = state.route;
+  if (forceRoute) state.route = activeRoute;
+  const deepRoute = ["prayer", "reader", "chapter", "topics", "reading-plan", "devotional"].includes(activeRoute);
+  const shell = `
+    <div class="app-shell ${forceRoute ? "mood-home-underlay" : ""}">
       ${deepRoute ? renderDeepHeader() : renderTopBar()}
-      <main class="screen-content route-${state.route}">${renderRoute()}</main>
+      <main class="screen-content route-${activeRoute}">${renderRoute()}</main>
       ${deepRoute ? "" : renderBottomNav()}
-      ${renderModal()}
+      ${includeModal ? renderModal() : ""}
     </div>`;
+  if (forceRoute) state.route = previousRoute;
+  return shell;
 }
 
 function renderTopBar() {
@@ -698,7 +756,7 @@ function renderRoute() {
 }
 
 function renderHome() {
-  const verse = getDailyVerse();
+  const verse = getAnnualDailyVerse();
   const verseRecord = featuredVerseRecord(verse, state.uiLang);
   const prayer = getPrayerExperience();
   const prayerDone = hasCompletedPrayer(state, new Date(), prayer.period);
@@ -711,7 +769,7 @@ function renderHome() {
       <span class="hero-kicker">${dualText("VERSÍCULO DEL DÍA", "VERSE OF THE DAY")}</span>
       <article class="hero-verse-button">
         <blockquote>“${renderInteractiveText(verse[state.uiLang])}”</blockquote>
-        <button class="hero-reference-button" data-action="open-reader" data-verse="${verse.id}">${verse.reference[state.uiLang]} ›</button>
+        <button class="hero-reference-button" data-action="open-bible-verse" data-version="${verseRecord.version}" data-book-id="${verseRecord.bookId}" data-chapter="${verseRecord.chapter}" data-verse-number="${verseRecord.verse}">${verse.reference[state.uiLang]} ›</button>
       </article>
       ${renderSelectionBar()}
       ${renderVerseTools(verseRecord)}
@@ -891,6 +949,7 @@ function renderProfile() {
         <h2>${dualText("Preferencias", "Preferences")}</h2>
         <button data-action="switch-language"><span class="setting-icon blue">${spotIllustration("translate")}</span><div><strong>${dualText("Idioma de la aplicación", "App language")}</strong><small>${state.uiLang === "es" ? dualText("Español · preferido para aprender español", "Spanish · preferred for learning Spanish") : dualText("English · preferred for learning English", "Inglés · preferido para aprender inglés")}</small></div><span class="language-code">${state.uiLang.toUpperCase()}</span></button>
         <button data-action="toggle-theme"><span class="setting-icon violet">${icon(state.dark ? "sun" : "moon")}</span><div><strong>${dualText("Apariencia", "Appearance")}</strong><small>${state.dark ? dualText("Modo oscuro", "Dark mode") : dualText("Modo claro", "Light mode")}</small></div><span class="toggle ${state.dark ? "on" : ""}"><i></i></span></button>
+        <div class="subtitle-setting"><span class="setting-icon blue">${icon("translate")}</span><div><strong>${dualText("Tamaño de subtítulos", "Subtitle size")}</strong><small>${dualText("Ajusta el texto del idioma secundario", "Adjust the secondary-language text")}</small><label><span>A</span><input id="subtitle-size-settings" type="range" min="0.9" max="1.7" step="0.1" value="${state.subtitleScale}" aria-label="${text("Tamaño de subtítulos", "Subtitle size")}"/><span>A</span><output>${Math.round(state.subtitleScale * 100)}%</output></label></div></div>
         <button data-action="toggle-notifications"><span class="setting-icon gold">${spotIllustration("prayer")}</span><div><strong>${dualText("Recordatorios de oración", "Prayer reminders")}</strong><small>${state.notificationsEnabled ? dualText("7:00 · 15:00 · 21:30", "7:00 AM · 3:00 PM · 9:30 PM") : dualText("Desactivados", "Off")}</small></div><span class="toggle ${state.notificationsEnabled ? "on" : ""}"><i></i></span></button>
         <button data-action="ad-privacy-options"><span class="setting-icon blue">${icon("shield")}</span><div><strong>${dualText("Privacidad de anuncios", "Ad privacy")}</strong><small>${dualText("Revisar opciones de consentimiento", "Review consent choices")}</small></div>${icon("chevron")}</button>
         <button data-action="open-privacy-policy"><span class="setting-icon sage">${icon("shield")}</span><div><strong>${dualText("Política de privacidad", "Privacy policy")}</strong><small>${dualText("Datos, proveedores y eliminación", "Data, providers, and deletion")}</small></div>${icon("chevron")}</button>
@@ -997,7 +1056,7 @@ function renderYouthDevotional() {
 
 function renderPrayer() {
   const prayer = getPrayerExperience();
-  const verse = getVerse(prayer.verseId);
+  const verse = prayer.verse || getVerse(prayer.verseId);
   const sourceLang = state.bibleVersion === "mi-biblia" ? "es" : "en";
   const versionLabel = state.bibleVersion === "mi-biblia" ? text("Biblia en español", "Spanish Bible") : text("Biblia en inglés", "English Bible");
   const track = prayerTracks.find((item) => item.id === state.currentTrackId) || prayerTracks[0];
@@ -1006,11 +1065,11 @@ function renderPrayer() {
   const verseRecord = featuredVerseRecord(verse, sourceLang);
   return `
     <section class="prayer-hero prayer-${prayer.period}">
+      ${prayer.eventName ? `<span class="special-day-badge">${dualObject(prayer.eventName)}</span>` : ""}
       <span class="eyebrow">${dualText("MOMENTO DE ORACIÓN", "PRAYER MOMENT")}<b class="local-time">${new Intl.DateTimeFormat(state.uiLang === "es" ? "es-CO" : "en-US", { hour: "numeric", minute: "2-digit" }).format(new Date())}</b></span>
       <div class="prayer-sun">${icon(prayer.iconName)}</div>
       <h1>${dualObject(prayer.intro)}</h1>
       <p>${dualText(`Selecciona una o varias palabras en ${sourceLang === "en" ? "inglés" : "español"} y toca Traducir.`, `Select one or more ${sourceLang === "en" ? "English" : "Spanish"} words, then tap Translate.`, "hero-guidance")}</p>
-      <div class="prayer-music-card ${state.audioPlaying ? "playing" : "muted"}"><button class="music-orbit-button" data-action="toggle-audio" aria-label="${state.audioPlaying ? text("Pausar música", "Pause music") : text("Reproducir música", "Play music")}">${icon(state.audioPlaying ? "pause" : "music")}</button><div>${dualText(state.audioPlaying ? "SONANDO AHORA" : "MÚSICA EN PAUSA", state.audioPlaying ? "NOW PLAYING" : "MUSIC PAUSED", "music-status")}<strong>${dualObject(track.label, "track-copy")}</strong></div><button class="music-next-button" data-action="next-track" aria-label="${text("Siguiente canción", "Next track")}">${icon("skip")}</button><i class="music-equalizer"><b></b><b></b><b></b><b></b></i></div>
     </section>
     <article class="devotional-content">
       <section class="devotional-section verse-section ${highlightClass(verseRecord.key)}" ${verseHostAttributes(verseRecord)}>
@@ -1036,8 +1095,12 @@ function renderPrayer() {
         <p class="devotional-secondary" lang="${opposite()}">${escapeHtml(prayer.prayer[opposite()])}</p>
       </section>
       <button class="amen-button ${done ? "completed" : ""}" data-action="amen">${done ? icon("check") : ""}${done ? dualText("Momento completado", "Moment completed") : dualText("Amén", "Amen")}</button>
-      <p class="amen-hint">${done ? dualText("Este momento quedó guardado. La próxima oración se habilitará en su horario.", "This moment is saved. The next prayer will be available in its time period.") : dualText("Completa la oración para cuidar tu racha", "Complete the prayer to protect your streak")}</p>
-    </article>`;
+      <p class="amen-hint">${done ? dualText("Este momento quedó guardado. La próxima oración se habilitará en su horario.", "This moment is saved. The next prayer will be available in its time period.") : dualText("Tu progreso se guarda al instante; la racha diaria se obtiene al abrir DuoBiblia.", "Your progress is saved instantly; the daily streak is earned by opening DuoBiblia.")}</p>
+    </article>
+    <aside class="prayer-music-float ${state.audioPlaying ? "playing" : "muted"}" aria-live="polite">
+      <button class="music-orbit-button" data-action="toggle-audio" aria-label="${state.audioPlaying ? text("Silenciar música", "Mute music") : text("Activar música", "Unmute music")}">${icon("music")}</button>
+      <strong>${dualObject(track.label, "track-copy")}</strong>
+    </aside>`;
 }
 
 function renderInteractiveTokens(value, tokenState) {
@@ -1194,7 +1257,7 @@ function renderModal() {
     return `<div class="modal-layer"><form class="modal-card note-modal" id="note-form" ${verseHostAttributes(record)}>${close}<span class="modal-icon">${icon("note")}</span><p class="eyebrow">${dualText("NOTA PERSONAL", "PERSONAL NOTE")}</p><h2>${escapeHtml(record.reference)}</h2><p class="note-verse">“${escapeHtml(record.text)}”</p><label>${dualText("¿Qué quieres recordar?", "What do you want to remember?")}<textarea id="note-text" maxlength="500" placeholder="${text("Escribe tu reflexión...", "Write your reflection...")}">${escapeHtml(state.notes[record.key] || "")}</textarea></label><small class="note-autosave-status" id="note-autosave-status">${dualText("Se guarda automáticamente", "Saved automatically")}</small><button class="primary-button" data-action="save-note">${dualText("Listo", "Done")}</button></form></div>`;
   }
   if (state.modal.type === "streak") {
-    return `<div class="modal-layer streak-layer"><div class="modal-card streak-celebration">${close}<div class="confetti"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="big-flame">${icon("flame")}</div><p class="eyebrow">${text("ORACIÓN COMPLETADA", "PRAYER COMPLETE")}</p><h2>${state.streak} ${text("días de racha", "day streak")}</h2><p>${text("Hoy elegiste comenzar con paz. Tu constancia está formando algo hermoso.", "Today you chose to begin in peace. Your consistency is shaping something beautiful.")}</p><div class="premium-progress"><div><span>${state.streak}</span><b>/ ${STREAK_GOAL}</b></div><div class="progress-track"><span style="width:${progressPercent(state.streak)}%"></span></div><small>${state.streak >= STREAK_GOAL ? text("¡Ganaste 1 mes Premium gratis!", "You earned 1 free Premium month!") : text(`${STREAK_GOAL - state.streak} días para 1 mes Premium gratis`, `${STREAK_GOAL - state.streak} days to 1 free Premium month`)}</small></div><span class="points-earned">${icon("star")} +50 XP</span>${state.streak >= STREAK_GOAL && !state.premium ? `<button class="primary-button" data-action="claim-streak-reward">${text("Reclamar mi mes gratis", "Claim my free month")}</button>` : ""}<button class="secondary-button" data-action="close-streak">${text("Continuar mi día", "Continue my day")}</button></div></div>`;
+    return `<div class="modal-layer streak-layer"><div class="modal-card streak-celebration">${close}<div class="confetti"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="big-flame">${icon("flame")}</div><p class="eyebrow">${dualText("DÍA SUMADO", "DAY ADDED")}</p><h2>+1 · ${state.streak} ${text("días de racha", "day streak")}</h2><p>${dualText("Abriste DuoBiblia hoy. Tu constancia diaria está formando un hábito hermoso.", "You opened DuoBiblia today. Your daily consistency is forming a beautiful habit.")}</p><div class="premium-progress"><div><span>${state.streak}</span><b>/ ${STREAK_GOAL}</b></div><div class="progress-track"><span style="width:${progressPercent(state.streak)}%"></span></div><small>${state.streak >= STREAK_GOAL ? text("¡Ganaste 1 mes Premium gratis!", "You earned 1 free Premium month!") : text(`${STREAK_GOAL - state.streak} días para 1 mes Premium gratis`, `${STREAK_GOAL - state.streak} days to 1 free Premium month`)}</small></div><span class="points-earned">${icon("star")} +50 XP</span>${state.streak >= STREAK_GOAL && !state.premium ? `<button class="primary-button" data-action="claim-streak-reward">${text("Reclamar mi mes gratis", "Claim my free month")}</button>` : ""}<button class="secondary-button" data-action="close-streak">${dualText("Continuar", "Continue")}</button></div></div>`;
   }
   if (state.modal.type === "account") {
     return `<div class="modal-layer"><form class="modal-card account-modal" id="account-form">${close}<img src="./assets/app-logo.png" alt=""/><p class="eyebrow">${state.pendingPremium || state.pendingStreakReward ? text("CUENTA REQUERIDA PARA PREMIUM", "ACCOUNT REQUIRED FOR PREMIUM") : text("GUARDA TU CAMINO", "SAVE YOUR JOURNEY")}</p><h2>${text("Inicia sesión o crea tu cuenta", "Sign in or create your account")}</h2><p>${text("Tu racha, puntos, favoritos y notas se integrarán automáticamente.", "Your streak, points, favorites, and notes will sync automatically.")}</p>${!authConfigured ? `<div class="auth-config-warning">${dualText("Falta conectar Supabase.", "Supabase must be connected.")}</div>` : state.cloudProfilesEnabled === false ? `<div class="auth-config-warning">${dualText("La cuenta estará disponible al aplicar la migración incluida en Supabase.", "Accounts will be available after applying the included Supabase migration.")}</div>` : state.googleAuthEnabled === false ? `<div class="auth-config-warning">${dualText("El acceso por correo está disponible. Google se activará al configurar el proveedor en Supabase.", "Email access is available. Google will activate after its provider is configured in Supabase.")}</div>` : ""}<button type="button" class="google-auth-button" data-action="google-auth" ${state.authLoading || !authConfigured || state.cloudProfilesEnabled !== true || state.googleAuthEnabled !== true ? "disabled" : ""}><span>G</span>${dualText(state.googleAuthEnabled === false ? "Google pendiente de activación" : "Continuar con Google", state.googleAuthEnabled === false ? "Google activation pending" : "Continue with Google")}</button><div class="auth-divider"><span>${text("o con tu correo", "or use your email")}</span></div><label>Email<input id="account-email" required type="email" autocomplete="email" value="${escapeHtml(state.authEmail || "")}" placeholder="tu@email.com" /></label>${state.authError ? `<p class="auth-error">${escapeHtml(state.authError)}</p>` : ""}<button class="primary-button" data-action="send-email-code" ${state.authLoading || !authConfigured || state.cloudProfilesEnabled !== true || !state.emailAuthEnabled ? "disabled" : ""}>${state.authLoading ? text("Enviando…", "Sending…") : dualText("Enviar código de verificación", "Send verification code")}</button><small>${dualText("Recibirás un código de seis dígitos. No compartiremos tu correo.", "You'll receive a six-digit code. We won't share your email.")}</small></form></div>`;
@@ -1238,6 +1301,8 @@ function progressForSync() {
     dataSchemaVersion: DATA_SCHEMA_VERSION,
     streak: state.streak,
     points: state.points,
+    lastOpenDate: state.lastOpenDate,
+    lastOpenAt: state.lastOpenAt,
     lastPrayerDate: state.lastPrayerDate,
     lastPrayerCompletedAt: state.lastPrayerCompletedAt,
     prayerCompletions: state.prayerCompletions,
@@ -1260,6 +1325,8 @@ function progressForSync() {
     quizStats: state.quizStats,
     uiLang: state.uiLang,
     bibleVersion: state.bibleVersion,
+    subtitleScale: state.subtitleScale,
+    subtitleOnboardingDone: state.subtitleOnboardingDone,
     progressUpdatedAt: state.progressUpdatedAt,
     progressRevision: state.progressRevision,
     fieldUpdatedAt: state.fieldUpdatedAt
@@ -1288,6 +1355,8 @@ async function handleAuthSession(session) {
       premiumUntil: entitlement.premiumUntil,
       streak: syncedProgress.streak ?? state.streak,
       points: syncedProgress.points ?? state.points,
+      lastOpenDate: syncedProgress.lastOpenDate ?? state.lastOpenDate,
+      lastOpenAt: syncedProgress.lastOpenAt ?? state.lastOpenAt,
       lastPrayerDate: syncedProgress.lastPrayerDate ?? state.lastPrayerDate,
       lastPrayerCompletedAt: syncedProgress.lastPrayerCompletedAt ?? state.lastPrayerCompletedAt,
       prayerCompletions: syncedProgress.prayerCompletions || state.prayerCompletions,
@@ -1308,6 +1377,8 @@ async function handleAuthSession(session) {
       dailyQuizAnswers: syncedProgress.dailyQuizAnswers || state.dailyQuizAnswers,
       dailyQuizCompleted: syncedProgress.dailyQuizCompleted || state.dailyQuizCompleted,
       quizStats: syncedProgress.quizStats || state.quizStats,
+      subtitleScale: syncedProgress.subtitleScale ?? state.subtitleScale,
+      subtitleOnboardingDone: syncedProgress.subtitleOnboardingDone ?? state.subtitleOnboardingDone,
       progressUpdatedAt: syncedProgress.progressUpdatedAt || state.progressUpdatedAt,
       progressRevision: syncedProgress.progressRevision ?? state.progressRevision,
       fieldUpdatedAt: syncedProgress.fieldUpdatedAt || state.fieldUpdatedAt,
@@ -1721,12 +1792,29 @@ async function playPrayerTrack(track = chooseNextTrack(state.currentTrackId)) {
     prayerAudio.removeAttribute("src");
   }
   const audio = new Audio(track.src);
-  audio.volume = 0.82;
+  audio.volume = 1;
   audio.preload = "auto";
   audio.addEventListener("ended", () => {
     if (state.musicEnabled && state.route === "prayer") playPrayerTrack();
   }, { once: true });
   prayerAudio = audio;
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      prayerAudioSource?.disconnect();
+      prayerAudioGain?.disconnect();
+      prayerAudioContext ||= new AudioContextClass();
+      if (prayerAudioContext.state === "suspended") await prayerAudioContext.resume();
+      prayerAudioSource = prayerAudioContext.createMediaElementSource(audio);
+      prayerAudioGain = prayerAudioContext.createGain();
+      prayerAudioGain.gain.value = 1.45;
+      prayerAudioSource.connect(prayerAudioGain);
+      prayerAudioGain.connect(prayerAudioContext.destination);
+    }
+  } catch {
+    prayerAudioSource = null;
+    prayerAudioGain = null;
+  }
   state.currentTrackId = track.id;
   state.musicEnabled = true;
   persist();
@@ -1762,6 +1850,10 @@ function stopPrayerMusic() {
     prayerAudio.pause();
     prayerAudio.removeAttribute("src");
   }
+  try { prayerAudioSource?.disconnect(); } catch { /* already disconnected */ }
+  try { prayerAudioGain?.disconnect(); } catch { /* already disconnected */ }
+  prayerAudioSource = null;
+  prayerAudioGain = null;
   prayerAudio = null;
   state.audioPlaying = false;
 }
@@ -1771,6 +1863,23 @@ function suspendActiveMedia() {
   if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
 
+function enterAppAfterMood(routePatch = { route: "home" }) {
+  const result = claimDailyOpen(state, new Date());
+  const showStreak = result.newlyClaimed;
+  const showNotifications = !showStreak && !state.notificationPromptSeen;
+  setState({
+    ...routePatch,
+    phase: "app",
+    streak: result.streak,
+    points: result.points,
+    lastOpenDate: result.lastOpenDate,
+    lastOpenAt: result.lastOpenAt,
+    modal: showStreak ? { type: "streak" } : (showNotifications ? { type: "notifications" } : null),
+    notificationPromptSeen: state.notificationPromptSeen || showNotifications
+  });
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+
 app.addEventListener("click", async (event) => {
   const actionTarget = event.target.closest("[data-action]");
   if (!actionTarget) return;
@@ -1778,16 +1887,18 @@ app.addEventListener("click", async (event) => {
 
   if (action === "choose-language") {
     const uiLang = actionTarget.dataset.language;
-    setState({ uiLang, bibleVersion: uiLang === "es" ? "mi-biblia" : "kjv", onboarded: true, phase: "mood" });
+    setState({ uiLang, bibleVersion: uiLang === "es" ? "mi-biblia" : "kjv", onboarded: true, phase: "subtitle-setup" });
+  } else if (action === "continue-subtitle") {
+    setState({ subtitleOnboardingDone: true, phase: "mood", route: "home", modal: null });
   } else if (action === "skip-mood") {
-    setState({ moodDate: dateKey(), phase: "app", route: "home", notificationPromptSeen: true, modal: state.notificationPromptSeen ? null : { type: "notifications" } });
+    state.moodDate = dateKey();
+    enterAppAfterMood({ route: "home" });
   } else if (action === "choose-mood") {
     setState({ moodDate: dateKey(), modal: { type: "mood-verse", moodId: actionTarget.dataset.mood } });
   } else if (action === "continue-home") {
-    setState({ phase: "app", route: "home", notificationPromptSeen: true, modal: state.notificationPromptSeen ? null : { type: "notifications" } });
+    enterAppAfterMood({ route: "home" });
   } else if (action === "read-mood-verse") {
-    state.phase = "app";
-    openReader(actionTarget.dataset.verse);
+    enterAppAfterMood({ route: "reader", selectedVerseId: actionTarget.dataset.verse });
   } else if (action === "nav") {
     navigate(actionTarget.dataset.route);
   } else if (action === "back") {
@@ -1896,7 +2007,12 @@ app.addEventListener("click", async (event) => {
     setState(withStoredRecord(record, { modal: { type: "verse-tools", record } }), true);
   } else if (action === "close-modal" || action === "close-on-backdrop") {
     if (action === "close-on-backdrop" && !event.target.classList.contains("modal-layer")) return;
-    setState({ modal: null, pendingPremium: false, pendingStreakReward: false, authError: null });
+    if (state.modal?.type === "streak") {
+      const showNotifications = !state.notificationPromptSeen;
+      setState({ modal: showNotifications ? { type: "notifications" } : null, notificationPromptSeen: state.notificationPromptSeen || showNotifications });
+    } else {
+      setState({ modal: null, pendingPremium: false, pendingStreakReward: false, authError: null });
+    }
   } else if (action === "toggle-favorite") {
     const record = recordFromElement(actionTarget);
     if (!record) return;
@@ -1939,13 +2055,12 @@ app.addEventListener("click", async (event) => {
     const prayer = getPrayerExperience();
     const result = completePrayer(state, new Date(), prayer.period);
     if (!result.newlyCompleted) return showToast(text("Este momento de oración ya está completo", "This prayer moment is already complete"));
-    setState({ streak: result.streak, points: result.points, lastPrayerDate: result.lastPrayerDate, lastPrayerCompletedAt: result.lastPrayerCompletedAt, prayerCompletions: result.prayerCompletions, modal: null });
+    setState({ points: result.points, lastPrayerDate: result.lastPrayerDate, lastPrayerCompletedAt: result.lastPrayerCompletedAt, prayerCompletions: result.prayerCompletions, modal: null });
     await showAchievementInterstitial({ premium: state.premium });
-    setState({ modal: { type: "streak" } }, false);
+    showToast(text("Oración completada · +50 XP", "Prayer completed · +50 XP"));
   } else if (action === "close-streak") {
-    stopPrayerMusic();
-    setState({ route: "home", modal: null, audioPlaying: false });
-    window.scrollTo({ top: 0, behavior: "instant" });
+    const showNotifications = !state.notificationPromptSeen;
+    setState({ modal: showNotifications ? { type: "notifications" } : null, notificationPromptSeen: state.notificationPromptSeen || showNotifications });
   } else if (action === "claim-streak-reward") {
     if (!state.authUser) {
       setState({ modal: { type: "account" }, pendingStreakReward: true, authError: null });
@@ -2006,13 +2121,21 @@ app.addEventListener("click", async (event) => {
     try {
       const result = await enablePrayerNotifications(state.uiLang);
       if (!result.enabled) {
+        if (result.reason === "denied") {
+          setState({ notificationsEnabled: false, notificationPromptSeen: true, notificationSettingsPending: true, modal: null });
+          const opened = await openNotificationSettings();
+          showToast(opened
+            ? text("Activa Notificaciones para DuoBiblia y vuelve a la aplicación", "Enable Notifications for DuoBiblia and return to the app")
+            : text("Permiso denegado. Actívalo en los ajustes de DuoBiblia.", "Permission denied. Enable it in DuoBiblia settings."));
+          return;
+        }
         showToast(result.reason === "unsupported"
           ? text("Los recordatorios estarán disponibles en el APK", "Reminders will be available in the APK")
-          : text("Permiso denegado. Puedes activarlo en Ajustes del celular.", "Permission denied. You can enable it in phone Settings."));
-        setState({ notificationsEnabled: false, notificationPromptSeen: true, modal: null });
+          : text("No pudimos programar los recordatorios", "We couldn't schedule the reminders"));
+        setState({ notificationsEnabled: false, notificationPromptSeen: true, notificationSettingsPending: false, modal: null });
         return;
       }
-      setState({ notificationsEnabled: true, notificationPromptSeen: true, modal: null });
+      setState({ notificationsEnabled: true, notificationPromptSeen: true, notificationSettingsPending: false, modal: null });
       showToast(text("Tres recordatorios diarios activados", "Three daily reminders enabled"));
     } catch {
       showToast(text("No pudimos programar los recordatorios", "We couldn't schedule the reminders"));
@@ -2121,7 +2244,8 @@ app.addEventListener("click", async (event) => {
       const preservedPreferences = {
         phase: "app", onboarded: true, uiLang: state.uiLang, bibleVersion: state.bibleVersion,
         dark: state.dark, notificationPromptSeen: state.notificationPromptSeen,
-        notificationsEnabled: state.notificationsEnabled
+        notificationsEnabled: state.notificationsEnabled, subtitleScale: state.subtitleScale,
+        subtitleOnboardingDone: state.subtitleOnboardingDone
       };
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(STORAGE_BACKUP_KEY);
@@ -2174,6 +2298,16 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("input", (event) => {
+  if (["subtitle-size-onboarding", "subtitle-size-settings"].includes(event.target.id)) {
+    const subtitleScale = Math.max(.9, Math.min(1.7, Number(event.target.value) || 1.15));
+    setState({ subtitleScale }, true, false);
+    document.documentElement.style.setProperty("--subtitle-scale", String(subtitleScale));
+    const output = event.target.id === "subtitle-size-onboarding"
+      ? document.querySelector("#subtitle-size-value")
+      : event.target.closest("label")?.querySelector("output");
+    if (output) output.textContent = `${Math.round(subtitleScale * 100)}%`;
+    return;
+  }
   if (event.target.id === "note-text") {
     const record = recordFromElement(event.target);
     if (!record) return;
@@ -2219,24 +2353,43 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.modal) setState({ modal: null }, false);
 });
 
-MobileApp.addListener("appStateChange", ({ isActive }) => {
+MobileApp.addListener("appStateChange", async ({ isActive }) => {
   if (!isActive) {
+    prayerKeepAwakeRequested = false;
+    setPrayerKeepAwake(false).catch(() => {});
     suspendActiveMedia();
     persist();
     flushProgressSync();
     return;
   }
+  if (state.notificationSettingsPending) {
+    try {
+      const result = await enablePrayerNotifications(state.uiLang);
+      setState({
+        notificationsEnabled: result.enabled,
+        notificationSettingsPending: !result.enabled && result.reason === "denied"
+      });
+      if (result.enabled) showToast(text("Recordatorios activados correctamente", "Reminders enabled successfully"));
+    } catch {
+      setState({ notificationsEnabled: false }, true, false);
+    }
+  }
   if (state.dailyQuizDate !== dateKey()) {
     setState({ dailyQuizDate: dateKey(), dailyQuizAnswers: { language: null, bible: null }, dailyQuizCompleted: { language: false, bible: false }, quizCompleted: false, quizAnswer: null });
   } else if (["prayer", "home", "learn", "devotional"].includes(state.route)) render();
   ensurePrayerNotificationSchedule();
+  syncPrayerKeepAwake();
 }).catch(() => {});
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    prayerKeepAwakeRequested = false;
+    setPrayerKeepAwake(false).catch(() => {});
     suspendActiveMedia();
     persist();
     flushProgressSync();
+  } else {
+    syncPrayerKeepAwake();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -2266,7 +2419,22 @@ initializeMobileAds({ premium: state.premium });
 setTimeout(() => {
   if (prayerOpenedFromNotification) return;
   const moodSeenToday = state.moodDate === dateKey();
-  state.phase = !state.onboarded ? "onboarding" : (moodSeenToday ? "app" : "mood");
+  if (!state.onboarded) state.phase = "onboarding";
+  else if (!state.subtitleOnboardingDone) state.phase = "subtitle-setup";
+  else if (!moodSeenToday) {
+    state.phase = "mood";
+    state.route = "home";
+  } else {
+    const result = claimDailyOpen(state, new Date());
+    setState({
+      phase: "app",
+      streak: result.streak,
+      points: result.points,
+      lastOpenDate: result.lastOpenDate,
+      lastOpenAt: result.lastOpenAt,
+      modal: result.newlyClaimed ? { type: "streak" } : state.modal
+    }, true, false);
+  }
   if (state.phase === "app" && state.route === "chapter") openBibleChapter(state.selectedBookId, state.selectedChapter, state.selectedKjvVerse, state.bibleVersion);
   else render();
   if (state.phase === "app" && state.route === "devotional") loadYouthDevotionalContent();

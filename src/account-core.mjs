@@ -32,11 +32,16 @@ export function mergeProgress(saved = {}, local = {}) {
   const localHasRituals = (Number(local.dataSchemaVersion) || 0) >= 4;
   const ritualSchema = savedHasRituals || localHasRituals;
   const ritualSource = savedHasRituals && localHasRituals ? newer : (localHasRituals ? local : saved);
+  const streak = hasFieldHistory
+    ? Number(fieldSource("streak").streak ?? newer.streak ?? older.streak) || 0
+    : Math.max(Number(saved.streak) || 0, Number(local.streak) || 0);
   return {
     ...older,
     ...newer,
-    streak: Math.max(Number(saved.streak) || 0, Number(local.streak) || 0),
+    streak,
     points: Math.max(Number(saved.points) || 0, Number(local.points) || 0),
+    lastOpenDate: fieldSource("lastOpenDate").lastOpenDate || newer.lastOpenDate || older.lastOpenDate || null,
+    lastOpenAt: fieldSource("lastOpenAt").lastOpenAt || newer.lastOpenAt || older.lastOpenAt || null,
     readChapters: [...new Set([...(saved.completedPlanDays || []), ...(local.completedPlanDays || [])].map(Number))].length,
     completedPlanDays: [...new Set([...(saved.completedPlanDays || []), ...(local.completedPlanDays || [])].map(Number))].sort((a, b) => a - b),
     completedDevotionalDays: [...new Set([...(saved.completedDevotionalDays || []), ...(local.completedDevotionalDays || [])])],
@@ -51,6 +56,8 @@ export function mergeProgress(saved = {}, local = {}) {
     notes: { ...(mutable.notes || {}) },
     highlights: { ...(mutable.highlights || {}) },
     verseRecords: { ...(older.verseRecords || {}), ...(newer.verseRecords || {}) },
+    subtitleScale: fieldSource("subtitleScale").subtitleScale ?? newer.subtitleScale ?? older.subtitleScale ?? 1.15,
+    subtitleOnboardingDone: Boolean(fieldSource("subtitleOnboardingDone").subtitleOnboardingDone ?? newer.subtitleOnboardingDone ?? older.subtitleOnboardingDone),
     progressUpdatedAt: newer.progressUpdatedAt || older.progressUpdatedAt || null,
     progressRevision: Math.max(Number(saved.progressRevision) || 0, Number(local.progressRevision) || 0),
     fieldUpdatedAt

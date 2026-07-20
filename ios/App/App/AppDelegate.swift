@@ -16,6 +16,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         if let bridgeController = window?.rootViewController as? CAPBridgeViewController {
             bridgeController.loadViewIfNeeded()
+            bridgeController.bridge?.registerPluginInstance(NativeExperiencePlugin())
             bridgeController.bridge?.registerPluginInstance(PremiumStatePlugin())
             bridgeController.bridge?.registerPluginInstance(VerseSharePlugin())
         }
@@ -57,6 +58,36 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+}
+
+@objc(NativeExperiencePlugin)
+public class NativeExperiencePlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "NativeExperiencePlugin"
+    public let jsName = "NativeExperience"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "setKeepAwake", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openNotificationSettings", returnType: CAPPluginReturnPromise)
+    ]
+
+    @objc func setKeepAwake(_ call: CAPPluginCall) {
+        let enabled = call.getBool("enabled") ?? false
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = enabled
+            call.resolve(["enabled": enabled])
+        }
+    }
+
+    @objc func openNotificationSettings(_ call: CAPPluginCall) {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else {
+            call.reject("No se pudo abrir la configuración de DuoBiblia")
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { opened in
+                opened ? call.resolve() : call.reject("No se pudo abrir la configuración de DuoBiblia")
+            }
+        }
+    }
 }
 
 @objc(VerseSharePlugin)

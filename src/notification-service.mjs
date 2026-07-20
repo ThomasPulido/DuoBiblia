@@ -64,11 +64,7 @@ function nativeOnly() {
 }
 
 function hasCurrentSchedule(notifications = []) {
-  return PRAYER_NOTIFICATION_IDS.every((id) => notifications.some((notification) =>
-    notification.id === id
-      && (Capacitor.getPlatform() !== "android" || notification.channelId === CHANNEL_ID)
-      && (Capacitor.getPlatform() === "android" || notification.sound === SOUND_FILE)
-  ));
+  return PRAYER_NOTIFICATION_IDS.every((id) => notifications.some((notification) => Number(notification.id) === id));
 }
 
 export async function initializePrayerNotifications(onPrayerOpened) {
