@@ -1,5 +1,16 @@
 # Historial de versiones
 
+## 1.10.0 — Bienvenida diaria y oración anual
+
+- La racha aumenta una sola vez al día al abrir DuoBiblia y muestra la animación `+1` después del estado de ánimo; completar una oración ya no altera la racha.
+- La pantalla de emociones se presenta como un velo oscuro translúcido sobre el inicio y se adapta desde 320 px sin desbordamiento horizontal.
+- Calendario anual de oración con 365 días, 315 pasajes distintos extraídos de las Biblias integradas y experiencias de mañana, tarde y noche.
+- Año Nuevo, 14 de febrero, Viernes Santo, Resurrección, Nochebuena, Navidad y fin de año reciben contenido relacionado con la fecha.
+- Música devocional amplificada, control flotante único para silenciar y nombre de la pista; se detiene al dejar la aplicación.
+- La pantalla permanece encendida durante la oración y vuelve a su comportamiento normal al salir de ella o enviar la app al fondo.
+- Ajuste inicial del tamaño de subtítulos con ejemplo en vivo, disponible después en Perfil y sincronizado con la cuenta.
+- Los permisos de recordatorios vuelven a comprobarse al regresar de la configuración nativa de DuoBiblia.
+
 ## 1.9.0 — Matutina anual y traducción exacta por fragmentos
 
 - Nueva sección “Valientes por dentro” con 365 matutinas: versículo, lectura, reflexión, reto y oración navegables por fecha.

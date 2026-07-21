@@ -196,6 +196,22 @@ export function previousDateKey(date = new Date()) {
   return dateKey(copy);
 }
 
+export function claimDailyOpen(progress, now = new Date()) {
+  const today = dateKey(now);
+  if (progress.lastOpenDate === today) {
+    return { ...progress, newlyClaimed: false };
+  }
+  const continued = progress.lastOpenDate === previousDateKey(now);
+  return {
+    ...progress,
+    streak: continued ? (Number(progress.streak) || 0) + 1 : 1,
+    points: (Number(progress.points) || 0) + 50,
+    lastOpenDate: today,
+    lastOpenAt: now.toISOString(),
+    newlyClaimed: true
+  };
+}
+
 // The night prayer remains part of the day that began the previous morning.
 // This prevents a prayer completed after midnight from blocking the following
 // evening. Five o'clock is also the boundary used by getLocalDayPeriod().
@@ -235,13 +251,11 @@ export function completePrayer(progress, now = new Date(), period = getLocalDayP
   const key = prayerCompletionKey(now, period);
   const completions = progress.prayerCompletions || {};
   if (completions[key]) return { ...progress, newlyCompleted: false, prayerKey: key };
-  const alreadyCompletedToday = Object.keys(completions).some((item) => item.startsWith(`${today}:`));
-  const continued = progress.lastPrayerDate === previousPrayerDayKey(now);
   return {
     ...progress,
     prayerCompletions: { ...completions, [key]: now.toISOString() },
-    streak: alreadyCompletedToday ? progress.streak : (continued ? progress.streak + 1 : 1),
-    points: progress.points + 50,
+    streak: Number(progress.streak) || 0,
+    points: (Number(progress.points) || 0) + 50,
     lastPrayerDate: today,
     lastPrayerCompletedAt: now.toISOString(),
     newlyCompleted: true,

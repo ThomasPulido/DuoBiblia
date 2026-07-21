@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { books, completeDailyPrayer, completePrayer, dateKey, featuredVerses, getDailyVerse, getLocalDayPeriod, getMoodVerse, getWordHelp, hasCompletedDailyPrayer, hasCompletedPrayer, migratePrayerCompletions, normalizeWord, prayerDayKey, progressPercent, searchFeatured, wordDictionary } from "../src/core.mjs";
-import { ANNUAL_DEVOTIONALS, getAnnualDevotional } from "../src/daily-content.mjs";
+import { books, claimDailyOpen, completePrayer, dateKey, featuredVerses, getDailyVerse, getLocalDayPeriod, getMoodVerse, getWordHelp, hasCompletedDailyPrayer, hasCompletedPrayer, migratePrayerCompletions, normalizeWord, prayerDayKey, progressPercent, searchFeatured, wordDictionary } from "../src/core.mjs";
+import { ANNUAL_DEVOTIONALS, ANNUAL_PRAYER_VERSE_COUNT, getAnnualDailyVerse, getAnnualDevotional } from "../src/daily-content.mjs";
 import { ANNUAL_BIBLE_QUIZZES, ANNUAL_LANGUAGE_QUIZZES, ANNUAL_QUIZ_SETS, getDailyQuizSet } from "../src/annual-quizzes.mjs";
 import { chooseNextTrack, prayerTracks } from "../src/music.mjs";
 import { mergeProgress } from "../src/account-core.mjs";
@@ -16,26 +16,26 @@ import { getCompletedBookProgress, getReadingPlanDay, getReadingPlanWeek, READIN
 import { alignParallelFragment, selectionWords, translationMode } from "../src/translation-policy.mjs";
 import { DEVOTIONAL_DAYS, DEVOTIONAL_SUGGESTED_PRAYERS, devotionalIndexForDate, getDailyYouthDevotional, getYouthDevotional } from "../src/devotional-year.mjs";
 
-test("completar la oración inicia una racha y entrega puntos", () => {
-  const result = completeDailyPrayer({ streak: 0, points: 0, lastPrayerDate: null }, new Date(2026, 6, 13, 9));
+test("abrir la aplicación inicia la racha diaria y entrega puntos", () => {
+  const result = claimDailyOpen({ streak: 0, points: 0, lastOpenDate: null }, new Date(2026, 6, 13, 9));
   assert.equal(result.streak, 1);
   assert.equal(result.points, 50);
-  assert.equal(result.newlyCompleted, true);
+  assert.equal(result.newlyClaimed, true);
 });
 
-test("completar dos veces el mismo día no duplica la recompensa", () => {
-  const first = completePrayer({ streak: 8, points: 450, lastPrayerDate: "2026-07-12", prayerCompletions: {} }, new Date(2026, 6, 13, 8), "morning");
-  const duplicate = completePrayer(first, new Date(2026, 6, 13, 10), "morning");
+test("abrir dos veces el mismo día no duplica la racha ni la recompensa", () => {
+  const first = claimDailyOpen({ streak: 8, points: 450, lastOpenDate: "2026-07-12" }, new Date(2026, 6, 13, 8));
+  const duplicate = claimDailyOpen(first, new Date(2026, 6, 13, 10));
   assert.equal(duplicate.streak, 9);
   assert.equal(duplicate.points, 500);
-  assert.equal(duplicate.newlyCompleted, false);
+  assert.equal(duplicate.newlyClaimed, false);
 });
 
-test("mañana y noche son rituales distintos pero la racha sube una sola vez", () => {
+test("mañana y noche son rituales distintos y no alteran la racha", () => {
   const morning = completePrayer({ streak: 8, points: 450, lastPrayerDate: "2026-07-12", prayerCompletions: {} }, new Date(2026, 6, 13, 8), "morning");
   const night = completePrayer(morning, new Date(2026, 6, 13, 22), "night");
   assert.equal(night.newlyCompleted, true);
-  assert.equal(night.streak, 9);
+  assert.equal(night.streak, 8);
   assert.equal(night.points, 550);
   assert.equal(hasCompletedPrayer(night, new Date(2026, 6, 13, 22), "night"), true);
 });
@@ -45,20 +45,20 @@ test("una fecha heredada de la nube no bloquea una oración nueva", () => {
   assert.equal(hasCompletedPrayer(legacyCloud, new Date(2026, 6, 15, 22), "night"), false);
 });
 
-test("un día consecutivo aumenta la racha", () => {
-  const result = completeDailyPrayer({ streak: 8, points: 450, lastPrayerDate: "2026-07-12" }, new Date(2026, 6, 13, 8));
+test("abrir en un día consecutivo aumenta la racha", () => {
+  const result = claimDailyOpen({ streak: 8, points: 450, lastOpenDate: "2026-07-12" }, new Date(2026, 6, 13, 8));
   assert.equal(result.streak, 9);
 });
 
 test("Amén vuelve a habilitarse después de medianoche local", () => {
   const yesterdayNight = new Date(2026, 6, 14, 23, 58);
   const todayMorning = new Date(2026, 6, 15, 7, 0);
-  const previous = completeDailyPrayer({ streak: 8, points: 450, lastPrayerDate: "2026-07-13" }, yesterdayNight);
+  const previous = completePrayer({ streak: 8, points: 450, lastPrayerDate: "2026-07-13", prayerCompletions: {} }, yesterdayNight, "night");
   assert.equal(hasCompletedDailyPrayer(previous, yesterdayNight), true);
   assert.equal(hasCompletedDailyPrayer(previous, todayMorning), false);
-  const today = completeDailyPrayer(previous, todayMorning);
+  const today = completePrayer(previous, todayMorning, "morning");
   assert.equal(today.newlyCompleted, true);
-  assert.equal(today.streak, 10);
+  assert.equal(today.streak, 8);
   assert.equal(today.lastPrayerDate, "2026-07-15");
 });
 
@@ -71,7 +71,7 @@ test("una oración hecha después de medianoche pertenece a la noche anterior", 
   assert.equal(hasCompletedPrayer(completed, followingNight, "night"), false);
   const next = completePrayer(completed, followingNight, "night");
   assert.equal(next.newlyCompleted, true);
-  assert.equal(next.streak, 11);
+  assert.equal(next.streak, 9);
 });
 
 test("la migración corrige una noche antigua guardada después de medianoche", () => {
@@ -178,12 +178,18 @@ test("la oración se adapta a la hora local del dispositivo", () => {
 
 test("hay contenido automático distinto para los 365 días y tres momentos diarios", () => {
   assert.equal(ANNUAL_DEVOTIONALS.length, 365);
+  assert.ok(ANNUAL_PRAYER_VERSE_COUNT >= 300);
   for (const period of ["morning", "afternoon", "night"]) {
     assert.equal(new Set(ANNUAL_DEVOTIONALS.map((day) => day[period].id)).size, 365);
     assert.equal(new Set(ANNUAL_DEVOTIONALS.map((day) => day[period].prayer.es)).size, 365);
   }
   assert.equal(getAnnualDevotional(new Date(2026, 6, 15, 8)).period, "morning");
   assert.equal(getAnnualDevotional(new Date(2026, 6, 15, 22)).period, "night");
+  assert.equal(getAnnualDailyVerse(new Date(2026, 11, 25)).key, "LUK:2:11");
+  assert.equal(getAnnualDevotional(new Date(2026, 1, 14, 8)).eventName.es, "Día del amor");
+  assert.equal(getAnnualDevotional(new Date(2026, 3, 3, 22)).eventName.en, "Good Friday");
+  assert.equal(getAnnualDevotional(new Date(2026, 3, 5, 8)).eventName.en, "Easter Sunday");
+  assert.equal(getAnnualDevotional(new Date(2026, 11, 31, 22)).eventName.es, "Fin de año");
 });
 
 test("cada día del año tiene un quiz de idioma y otro de la Biblia", () => {
@@ -313,6 +319,24 @@ test("el autoguardado por campo conserva a la vez la nota remota y el color loca
   assert.deepEqual(merged.highlights, { verse: "sage" });
 });
 
+test("una racha reiniciada hoy no vuelve al valor antiguo guardado en la nube", () => {
+  const cloud = {
+    streak: 18,
+    lastOpenDate: "2026-07-18",
+    progressUpdatedAt: "2026-07-18T12:00:00.000Z",
+    fieldUpdatedAt: { streak: "2026-07-18T12:00:00.000Z", lastOpenDate: "2026-07-18T12:00:00.000Z" }
+  };
+  const local = {
+    streak: 1,
+    lastOpenDate: "2026-07-20",
+    progressUpdatedAt: "2026-07-20T08:00:00.000Z",
+    fieldUpdatedAt: { streak: "2026-07-20T08:00:00.000Z", lastOpenDate: "2026-07-20T08:00:00.000Z" }
+  };
+  const merged = mergeProgress(cloud, local);
+  assert.equal(merged.streak, 1);
+  assert.equal(merged.lastOpenDate, "2026-07-20");
+});
+
 test("la nube antigua no puede reponer la oración falsa del día actual", () => {
   const cloudV3 = {
     dataSchemaVersion: 3,
@@ -334,7 +358,7 @@ test("la nube antigua no puede reponer la oración falsa del día actual", () =>
   assert.equal(merged.lastPrayerDate, "2026-07-14");
   assert.deepEqual(merged.prayerCompletions, {});
   const completed = completePrayer(merged, new Date(2026, 6, 15, 22), "night");
-  assert.equal(completed.streak, 10);
+  assert.equal(completed.streak, 9);
 });
 
 test("el plan anual cubre los 1.189 capítulos exactamente una vez", () => {
@@ -357,8 +381,8 @@ test("la versión mínima permite bloquear instalaciones antiguas", () => {
   assert.equal(compareVersions("2.0.0", "1.9.9"), 1);
 });
 
-test("la versión 1.9.0 usa el nuevo enlace de Bold y los anuncios iOS entregados", () => {
-  assert.equal(APP_VERSION, "1.9.0");
+test("la versión 1.10.0 usa el enlace de Bold y los anuncios iOS entregados", () => {
+  assert.equal(APP_VERSION, "1.10.0");
   assert.equal(BOLD_CHECKOUT_URL, "https://checkout.bold.co/payment/LNK_84NNU7YDX9");
   assert.equal(ADMOB_IDS.iosAppId, "ca-app-pub-8007313797348394~9653183215");
   assert.equal(ADMOB_IDS.appOpen.iosProduction, "ca-app-pub-8007313797348394/7027019877");
@@ -374,7 +398,8 @@ test("la interfaz detiene multimedia, traduce tras confirmar la selección y com
   assert.match(appSource, /NativeVerseShare\.shareImage/);
   assert.match(appSource, /devotional-interactive-text/);
   assert.match(appSource, /STORAGE_BACKUP_KEY/);
-  assert.match(appSource, /audio\.volume = 0\.82/);
+  assert.match(appSource, /prayerAudioGain\.gain\.value = 1\.45/);
+  assert.match(appSource, /setPrayerKeepAwake/);
   assert.match(appSource, /translationMode/);
   assert.match(androidShareSource, /Intent\.ACTION_SEND/);
   assert.match(androidShareSource, /image\/png/);
